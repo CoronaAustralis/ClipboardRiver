@@ -1,0 +1,83 @@
+{{ define "tokens" }}
+{{ template "shell_top" . }}
+<div class="section-stack">
+  <div class="page-header">
+    <div>
+      <h1>{{ t .Base.T "page.tokens" }}</h1>
+      <p class="muted">{{ t .Base.T "page.tokens.subtitle" }}</p>
+    </div>
+  </div>
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2>{{ t .Base.T "tokens.create" }}</h2>
+        </div>
+      </div>
+      <div class="section-stack">
+        <form method="post" action="/admin/tokens/create" class="section-stack">
+          <div>
+            <label>{{ t .Base.T "tokens.max_uses" }}</label>
+            <input type="number" name="max_uses" value="1" min="1">
+          </div>
+          <div>
+            <label>{{ t .Base.T "tokens.expires_hours" }}</label>
+            <input type="number" name="expires_hours" value="168" min="1">
+          </div>
+          <label class="checkline"><input type="checkbox" name="no_expiry"> {{ t .Base.T "tokens.no_expiry" }}</label>
+          <div><button type="submit">{{ t .Base.T "tokens.generate" }}</button></div>
+        </form>
+        {{ if .CreatedCode }}
+        <div class="message">
+          {{ t .Base.T "tokens.new_code" }}: <strong class="mono">{{ .CreatedCode }}</strong>
+        </div>
+        {{ end }}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2>{{ t .Base.T "tokens.existing" }}</h2>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>{{ t .Base.T "table.id" }}</th>
+              <th>{{ t .Base.T "table.prefix" }}</th>
+              <th>{{ t .Base.T "table.usage" }}</th>
+              <th>{{ t .Base.T "table.status" }}</th>
+              <th>{{ t .Base.T "table.expires" }}</th>
+              <th>{{ t .Base.T "table.action" }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Tokens }}
+            <tr>
+              <td>#{{ .Token.ID }}</td>
+              <td><span class="mono">{{ .Token.CodePrefix }}</span></td>
+              <td>{{ .Token.UsedCount }}/{{ .Token.MaxUses }}</td>
+              <td><span class="pill {{ .StatusClass }}">{{ t $.Base.T .StatusKey }}</span></td>
+              <td>{{ formatTime .Token.ExpiresAt }}</td>
+              <td>
+                {{ if .CanRevoke }}
+                <div class="action-stack">
+                  <form class="inline" method="post" action="/admin/tokens/{{ .Token.ID }}/revoke"><button class="danger" type="submit">{{ t $.Base.T "tokens.revoke" }}</button></form>
+                </div>
+                {{ else }}
+                <span class="muted">-</span>
+                {{ end }}
+              </td>
+            </tr>
+            {{ else }}
+            <tr><td colspan="6" class="muted">{{ t .Base.T "tokens.empty" }}</td></tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{{ template "shell_bottom" . }}
+{{ end }}

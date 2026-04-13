@@ -1,0 +1,19 @@
+{
+  "server": {
+    "listen_addr": ":8080"
+  },
+  "storage": {
+    "driver": "sqlite",
+    "dsn": "./data/clipboard_river.db",
+    "data_dir": "./data",
+    "blob_dir": "./data/blobs"
+  },
+  "auth": {
+    "session_secret": "replace-with-a-long-random-secret"
+  },
+  "sync": {
+    "default_retention_days": 30,
+    "image_max_bytes": 5242880,
+    "text_batch_limit": 200
+  }
+}

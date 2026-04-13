@@ -1,0 +1,66 @@
+{{ define "devices" }}
+{{ template "shell_top" . }}
+<div class="section-stack">
+  <div class="page-header">
+    <div>
+      <h1>{{ t .Base.T "page.devices" }}</h1>
+      <p class="muted">{{ t .Base.T "page.devices.subtitle" }}</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="info-tile inline-info">
+      <p>{{ t .Base.T "devices.realtime_help" }}</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>{{ t .Base.T "table.id" }}</th>
+            <th>{{ t .Base.T "devices.nickname" }}</th>
+            <th>{{ t .Base.T "table.os" }}</th>
+            <th>{{ t .Base.T "table.platform" }}</th>
+            <th>{{ t .Base.T "table.version" }}</th>
+            <th>{{ t .Base.T "table.flags" }}</th>
+            <th>{{ t .Base.T "table.last_seen" }}</th>
+            <th>{{ t .Base.T "table.actions" }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .Devices }}
+          <tr>
+            <td>#{{ .Device.ID }}</td>
+            <td>
+              <strong>{{ if .Device.Nickname }}{{ .Device.Nickname }}{{ else }}{{ t $.Base.T "devices.unnamed" }}{{ end }}</strong>
+              <div class="muted mono">{{ .Device.DeviceUUID }}</div>
+            </td>
+            <td>{{ .Device.OSName }} {{ .Device.OSVersion }}</td>
+            <td>{{ .Device.Platform }}</td>
+            <td>{{ .Device.AppVersion }}</td>
+            <td>
+              <div class="pill-row">
+                <span class="pill {{ if .Online }}ok{{ else }}warn{{ end }}">{{ t $.Base.T "devices.online" }}={{ if .Online }}{{ t $.Base.T "common.yes" }}{{ else }}{{ t $.Base.T "common.no" }}{{ end }}</span>
+                <span class="pill {{ if .Device.SendRealtimeEnabled }}ok{{ end }}">{{ t $.Base.T "devices.send" }}={{ if .Device.SendRealtimeEnabled }}{{ t $.Base.T "common.yes" }}{{ else }}{{ t $.Base.T "common.no" }}{{ end }}</span>
+                <span class="pill {{ if .Device.ReceiveRealtimeEnabled }}ok{{ end }}">{{ t $.Base.T "devices.receive" }}={{ if .Device.ReceiveRealtimeEnabled }}{{ t $.Base.T "common.yes" }}{{ else }}{{ t $.Base.T "common.no" }}{{ end }}</span>
+                <span class="pill {{ if .Device.Disabled }}warn{{ else }}ok{{ end }}">{{ t $.Base.T "devices.disabled" }}={{ if .Device.Disabled }}{{ t $.Base.T "common.yes" }}{{ else }}{{ t $.Base.T "common.no" }}{{ end }}</span>
+              </div>
+            </td>
+            <td>{{ formatTime .Device.LastSeenAt }}</td>
+            <td>
+              <div class="action-stack">
+                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-send"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_send" }}</button></form>
+                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-receive"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_receive" }}</button></form>
+                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-disabled"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_disable" }}</button></form>
+                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/revoke-token"><button class="danger" type="submit">{{ t $.Base.T "devices.revoke_token" }}</button></form>
+              </div>
+            </td>
+          </tr>
+          {{ else }}
+          <tr><td colspan="8" class="muted">{{ t .Base.T "devices.no_devices" }}</td></tr>
+          {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{ template "shell_bottom" . }}
+{{ end }}

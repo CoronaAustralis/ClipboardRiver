@@ -1,0 +1,6 @@
+.git
+.gocache
+.gomodcache
+data
+config.json
+*.db

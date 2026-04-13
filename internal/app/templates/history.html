@@ -1,0 +1,71 @@
+{{ define "history" }}
+{{ template "shell_top" . }}
+<div class="section-stack">
+  <div class="page-header">
+    <div>
+      <h1>{{ t .Base.T "page.history" }}</h1>
+      <p class="muted">{{ t .Base.T "page.history.subtitle" }}</p>
+    </div>
+  </div>
+  <div class="card">
+    <form class="toolbar" method="get" action="/admin/history">
+      <select name="device_id">
+        <option value="">{{ t .Base.T "history.all_devices" }}</option>
+        {{ range .Devices }}
+        <option value="{{ .ID }}" {{ if eq $.Filters.device_id (printf "%d" .ID) }}selected{{ end }}>{{ if .Nickname }}{{ .Nickname }}{{ else }}{{ .DeviceUUID }}{{ end }}</option>
+        {{ end }}
+      </select>
+      <select name="kind">
+        <option value="">{{ t .Base.T "history.all_kinds" }}</option>
+        <option value="text" {{ if eq .Filters.kind "text" }}selected{{ end }}>{{ t .Base.T "history.kind.text" }}</option>
+        <option value="image" {{ if eq .Filters.kind "image" }}selected{{ end }}>{{ t .Base.T "history.kind.image" }}</option>
+      </select>
+      <input type="text" name="q" value="{{ .Filters.q }}" placeholder="{{ t .Base.T "history.search_placeholder" }}">
+      <button type="submit">{{ t .Base.T "history.filter" }}</button>
+    </form>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>{{ t .Base.T "table.id" }}</th>
+            <th>{{ t .Base.T "table.device" }}</th>
+            <th>{{ t .Base.T "table.kind" }}</th>
+            <th>{{ t .Base.T "table.upload" }}</th>
+            <th>{{ t .Base.T "table.preview" }}</th>
+            <th>{{ t .Base.T "table.created" }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range .Items }}
+          <tr>
+            <td>#{{ .Item.ID }}</td>
+            <td>
+              <strong>{{ .DeviceName }}</strong>
+            </td>
+            <td><span class="pill">{{ .Item.ContentKind }}</span></td>
+            <td><span class="pill">{{ .Item.UploadKind }}</span></td>
+            <td>
+              {{ if eq .Item.ContentKind "text" }}
+              <div class="meta-stack">
+                <div class="preview">{{ .Item.TextContent }}</div>
+                <div class="muted">{{ .Item.CharCount }} {{ t $.Base.T "history.chars" }}</div>
+              </div>
+              {{ else }}
+              <div class="meta-stack">
+                <a href="/api/v1/client/items/{{ .Item.ID }}/blob"><img class="thumb" src="/api/v1/client/items/{{ .Item.ID }}/blob" alt="{{ t $.Base.T "history.kind.image" }}"></a>
+                <div class="muted">{{ .Item.ByteSize }} bytes</div>
+              </div>
+              {{ end }}
+            </td>
+            <td>{{ formatTimeValue .Item.ClientCreatedAt }}</td>
+          </tr>
+          {{ else }}
+          <tr><td colspan="6" class="muted">{{ t .Base.T "history.empty" }}</td></tr>
+          {{ end }}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{ template "shell_bottom" . }}
+{{ end }}

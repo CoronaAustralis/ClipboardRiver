@@ -1,0 +1,80 @@
+{{ define "settings" }}
+{{ template "shell_top" . }}
+<div class="section-stack">
+  <div class="page-header">
+    <div>
+      <h1>{{ t .Base.T "page.settings" }}</h1>
+      <p class="muted">{{ t .Base.T "page.settings.subtitle" }}</p>
+    </div>
+  </div>
+  <div class="grid cols-2">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2>{{ t .Base.T "settings.runtime" }}</h2>
+        </div>
+      </div>
+      <form method="post" action="/admin/settings" class="section-stack">
+        <div>
+          <label class="checkline"><input type="checkbox" name="realtime_fanout_enabled" {{ checked .Account.RealtimeFanoutEnabled }}> {{ t .Base.T "settings.enable_realtime" }}</label>
+          <div class="muted">{{ t .Base.T "settings.enable_realtime_help" }}</div>
+        </div>
+        <div>
+          <label>{{ t .Base.T "settings.retention_days" }}</label>
+          <input type="number" name="retention_days" min="0" value="{{ .Account.RetentionDays }}">
+        </div>
+        <div>
+          <label>{{ t .Base.T "settings.image_max_bytes" }}</label>
+          <input type="number" name="image_max_bytes" min="1" value="{{ .Account.ImageMaxBytes }}">
+        </div>
+        <div><button type="submit">{{ t .Base.T "settings.save" }}</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2>{{ t .Base.T "settings.security" }}</h2>
+        </div>
+      </div>
+      <form method="post" action="/admin/settings/password" class="section-stack">
+        <div class="info-tile">
+          <div class="muted">{{ t .Base.T "settings.current_admin" }}</div>
+          <strong>{{ .Base.AdminUsername }}</strong>
+        </div>
+        <div class="muted">{{ t .Base.T "settings.password_help" }}</div>
+        <div>
+          <label for="current_password">{{ t .Base.T "settings.current_password" }}</label>
+          <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+        </div>
+        <div>
+          <label for="new_password">{{ t .Base.T "settings.new_password" }}</label>
+          <input id="new_password" name="new_password" type="password" autocomplete="new-password" required>
+        </div>
+        <div>
+          <label for="confirm_password">{{ t .Base.T "settings.confirm_password" }}</label>
+          <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required>
+        </div>
+        <div><button type="submit">{{ t .Base.T "settings.change_password" }}</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <h2>{{ t .Base.T "settings.storage" }}</h2>
+        </div>
+      </div>
+      <div class="info-grid">
+        <div class="info-tile">
+          <div class="muted">{{ t .Base.T "settings.db_driver" }}</div>
+          <strong>{{ .DBDriver }}</strong>
+        </div>
+        <div class="info-tile">
+          <div class="muted">{{ t .Base.T "settings.blob_dir" }}</div>
+          <p class="mono">{{ .BlobDir }}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{{ template "shell_bottom" . }}
+{{ end }}

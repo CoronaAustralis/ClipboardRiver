@@ -1,0 +1,369 @@
+{{ define "login" }}
+<!doctype html>
+<html lang="{{ .Base.Locale }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Base.Title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #14212b;
+      --muted: #65747e;
+      --line: rgba(20, 33, 43, 0.1);
+      --accent: #0f766e;
+      --accent-strong: #0b5c57;
+      --accent-soft: rgba(223, 245, 241, 0.88);
+      --accent-ring: rgba(15, 118, 110, 0.18);
+      --paper: rgba(255, 255, 255, 0.82);
+      --shadow-lg: 0 28px 70px rgba(15, 23, 42, 0.1);
+      --shadow-md: 0 18px 34px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      font-family: "Manrope", "Noto Sans SC", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 16% 18%, rgba(45, 212, 191, 0.18), transparent 26%),
+        radial-gradient(circle at 88% 16%, rgba(59, 130, 246, 0.12), transparent 22%),
+        linear-gradient(180deg, #f9fcfc 0%, #eef4f5 55%, #edf1f2 100%);
+    }
+
+    .login-shell {
+      width: min(460px, calc(100vw - 32px));
+      position: relative;
+      z-index: 1;
+    }
+
+    .login-card {
+      position: relative;
+      overflow: hidden;
+      padding: 28px;
+      border: 1px solid rgba(255, 255, 255, 0.78);
+      border-radius: 30px;
+      background: var(--paper);
+      backdrop-filter: blur(24px);
+      box-shadow: var(--shadow-lg);
+    }
+
+    .login-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto auto 0;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(20, 184, 166, 0.18) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .login-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-mark {
+      width: 54px;
+      height: 54px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      background: linear-gradient(145deg, #0f766e 0%, #14b8a6 100%);
+      color: white;
+      box-shadow: 0 16px 28px rgba(15, 118, 110, 0.24);
+    }
+
+    .brand-mark svg {
+      width: 30px;
+      height: 30px;
+      display: block;
+    }
+
+    .brand-copy strong {
+      display: block;
+      font-size: 1.05rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .brand-copy span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .lang-menu {
+      position: relative;
+    }
+
+    .lang-menu summary {
+      list-style: none;
+    }
+
+    .lang-menu summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .icon-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 48px;
+      height: 48px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow-md);
+      cursor: pointer;
+      transition: transform 140ms ease, border-color 140ms ease;
+    }
+
+    .icon-button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(15, 118, 110, 0.2);
+    }
+
+    .icon-button svg {
+      width: 18px;
+      height: 18px;
+      display: block;
+    }
+
+    .lang-panel {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 12px);
+      min-width: 200px;
+      padding: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(20px);
+      box-shadow: var(--shadow-lg);
+    }
+
+    .lang-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      text-decoration: none;
+      color: var(--ink);
+    }
+
+    .lang-option span {
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .lang-option small {
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 700;
+    }
+
+    .lang-option:hover {
+      background: rgba(15, 118, 110, 0.08);
+    }
+
+    .lang-option.active {
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.8rem, 4vw, 2.4rem);
+      letter-spacing: -0.06em;
+      line-height: 1;
+      position: relative;
+      z-index: 1;
+    }
+
+    .subtitle {
+      margin-bottom: 20px;
+      color: var(--muted);
+      line-height: 1.6;
+      position: relative;
+      z-index: 1;
+    }
+
+    .message {
+      margin-bottom: 16px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(15, 118, 110, 0.12);
+      background: linear-gradient(135deg, rgba(223, 245, 241, 0.92), rgba(255, 255, 255, 0.9));
+      color: var(--accent-strong);
+      font-weight: 700;
+      position: relative;
+      z-index: 1;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: #33424c;
+    }
+
+    .form-stack {
+      display: grid;
+      gap: 14px;
+      position: relative;
+      z-index: 1;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 15px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.9);
+      font: inherit;
+      color: var(--ink);
+      transition: border-color 140ms ease, box-shadow 140ms ease;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: rgba(15, 118, 110, 0.28);
+      box-shadow: 0 0 0 4px var(--accent-ring);
+    }
+
+    button {
+      width: 100%;
+      min-height: 46px;
+      border: 0;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #0f766e 0%, #14b8a6 100%);
+      color: white;
+      font: inherit;
+      font-size: 0.96rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      box-shadow: 0 18px 30px rgba(15, 118, 110, 0.22);
+      cursor: pointer;
+      transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 22px 36px rgba(15, 118, 110, 0.24);
+      filter: saturate(1.05);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 560px) {
+      body {
+        padding: 16px;
+      }
+
+      .login-card {
+        padding: 22px;
+        border-radius: 24px;
+      }
+
+      .brand-copy span {
+        display: none;
+      }
+
+    }
+  </style>
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-card">
+      <div class="login-head">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none">
+              <rect x="10" y="10" width="28" height="30" rx="9" fill="currentColor" opacity="0.18"></rect>
+              <rect x="15" y="8" width="18" height="8" rx="4" fill="currentColor"></rect>
+              <path d="M15 24c3.2-4.8 6.6-7.2 10-7.2 4.1 0 6.4 3.4 9 3.4 1.7 0 3.1-.7 4.5-2.2" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"></path>
+              <path d="M14 31.2c2.6-2.7 5.2-4.1 7.9-4.1 4.1 0 6.5 3.5 10.2 3.5 2 0 3.8-.8 5.9-2.5" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" opacity="0.92"></path>
+            </svg>
+          </span>
+          <span class="brand-copy">
+            <strong>Clipboard River</strong>
+            <span>{{ t .Base.T "app.admin_console" }}</span>
+          </span>
+        </div>
+        <details class="lang-menu">
+          <summary class="icon-button" aria-label="{{ t .Base.T "lang.select" }}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M3 12h18"></path>
+              <path d="M12 3a15.3 15.3 0 0 1 0 18"></path>
+              <path d="M12 3a15.3 15.3 0 0 0 0 18"></path>
+            </svg>
+            <span class="sr-only">{{ t .Base.T "lang.select" }}</span>
+          </summary>
+          <div class="lang-panel">
+            <a href="{{ .Base.LangZHURL }}" class="lang-option {{ if eq .Base.Locale "zh-CN" }}active{{ end }}">
+              <span>{{ t .Base.T "lang.zh" }}</span>
+              <small>简体中文</small>
+            </a>
+            <a href="{{ .Base.LangENURL }}" class="lang-option {{ if eq .Base.Locale "en" }}active{{ end }}">
+              <span>{{ t .Base.T "lang.en" }}</span>
+              <small>English</small>
+            </a>
+          </div>
+        </details>
+      </div>
+      <h1>{{ t .Base.T "page.login" }}</h1>
+      <div class="subtitle">{{ t .Base.T "login.subtitle" }}</div>
+      {{ if .Base.Message }}<div class="message">{{ .Base.Message }}</div>{{ end }}
+      <form method="post" action="/admin/login" class="form-stack">
+        <div>
+          <label for="username">{{ t .Base.T "login.username" }}</label>
+          <input id="username" name="username" placeholder="{{ t .Base.T "login.username" }}" autocomplete="username" required>
+        </div>
+        <div>
+          <label for="password">{{ t .Base.T "login.password" }}</label>
+          <input id="password" name="password" type="password" placeholder="{{ t .Base.T "login.password" }}" autocomplete="current-password" required>
+        </div>
+        <button type="submit">{{ t .Base.T "login.submit" }}</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
+{{ end }}
