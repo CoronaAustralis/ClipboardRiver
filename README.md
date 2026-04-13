@@ -103,8 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-riv
 
 ## Docker
 
-```powershell
-docker build -t clipboard-river-server .
+```
 docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server
 ```
 
