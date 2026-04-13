@@ -80,7 +80,7 @@ Protocol and API details live in [ApiRef.md](./ApiRef.md). The README intentiona
 ## Repositories
 
 - Server: `cb_river_server` (this repository)
-- Windows client: [cb_river_client_windows](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
+- Windows client: [cb_river_client_windows](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
 - Android client: [cb_river_client_android](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
 - API reference: [ApiRef.md](./ApiRef.md)
 
@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-riv
 
 ```powershell
 docker build -t clipboard-river-server .
-docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data clipboard-river-server
+docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server
 ```
 
 - container config path: `/app/data/config.json`

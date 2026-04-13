@@ -26,6 +26,4 @@ ENV CBR_CONFIG=./data/config.json
 EXPOSE 8080
 VOLUME ["/app/data"]
 
-USER cbr
-
 CMD ["./cb-river-server"]

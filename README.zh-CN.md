@@ -82,8 +82,8 @@ iOS 会在后续版本推出。
 ## 仓库入口
 
 - 服务端：`cb_river_server`（当前仓库）
-- Windows 客户端：[cb_river_client_windows](https://github.com/clipboardriver/cb_river_client_windows)
-- Android 客户端：[cb_river_client_android](https://github.com/clipboardriver/cb_river_client_android)
+- Windows 客户端：[cb_river_client_windows](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
+- Android 客户端：[cb_river_client_android](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
 - 接口文档：[ApiRef.md](./ApiRef.md)
 
 上面的客户端仓库链接是按当前工作区里的项目命名推导出来的。如果你后续发布时使用了不同的组织名或仓库名，把这里替换掉即可。
@@ -107,7 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-riv
 
 ```powershell
 docker build -t clipboard-river-server .
-docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data clipboard-river-server
+docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server
 ```
 
 - 容器内配置路径：`/app/data/config.json`
