@@ -108,6 +108,7 @@ func (a *App) pageBase(w http.ResponseWriter, r *http.Request, titleKey, nav str
 }
 
 func (a *App) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
+	base := a.pageBase(w, r, "page.history", "history")
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
@@ -159,19 +160,24 @@ func (a *App) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		deviceNames[device.ID] = name
 	}
+	deletedDeviceName := base.T("history.deleted_device")
 
 	rows := make([]historyRow, 0, len(items))
 	for _, item := range items {
+		deviceName := deviceNames[item.SourceDeviceID]
+		if strings.TrimSpace(deviceName) == "" {
+			deviceName = deletedDeviceName
+		}
 		rows = append(rows, historyRow{
 			Item:       item,
-			DeviceName: deviceNames[item.SourceDeviceID],
+			DeviceName: deviceName,
 			BlobName:   fileNameFromPath(item.BlobPath),
 			PreviewImg: item.ContentKind == model.ContentKindFile && strings.HasPrefix(strings.ToLower(item.MimeType), "image/"),
 		})
 	}
 
 	a.render(w, "history", map[string]any{
-		"Base":       a.pageBase(w, r, "page.history", "history"),
+		"Base":       base,
 		"Items":      rows,
 		"Devices":    devices,
 		"Pagination": buildHistoryPagination(page, pageSize, totalItems, deviceID, kind, query),
@@ -321,12 +327,15 @@ func (a *App) handleToggleDeviceField(w http.ResponseWriter, r *http.Request, fi
 	redirectWithMessage(w, r, "/admin/devices", message, nil)
 }
 
-func (a *App) handleAdminRevokeDeviceToken(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleAdminDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
 	if err == nil {
-		err = a.db.Model(&model.Device{}).Where("id = ?", id).Update("device_token_hash", "").Error
+		err = a.db.Where("account_id = ? AND id = ?", a.account.ID, id).Delete(&model.Device{}).Error
+		if err == nil {
+			a.hub.CloseDevice(uint(id))
+		}
 	}
-	message := "device_token_revoked"
+	message := "device_deleted"
 	if err != nil {
 		message = "revoke_failed"
 	}

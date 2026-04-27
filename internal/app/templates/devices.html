@@ -50,7 +50,7 @@
                 <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-send"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_send" }}</button></form>
                 <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-receive"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_receive" }}</button></form>
                 <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/toggle-disabled"><button class="secondary" type="submit">{{ t $.Base.T "devices.toggle_disable" }}</button></form>
-                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/revoke-token"><button class="danger" type="submit">{{ t $.Base.T "devices.revoke_token" }}</button></form>
+                <form class="inline" method="post" action="/admin/devices/{{ .Device.ID }}/delete"><button class="danger" type="submit">{{ t $.Base.T "devices.delete_device" }}</button></form>
               </div>
             </td>
           </tr>

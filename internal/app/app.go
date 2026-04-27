@@ -125,7 +125,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("POST /admin/devices/{id}/toggle-send", a.withAdminAuth(a.handleAdminToggleDeviceSend))
 	mux.HandleFunc("POST /admin/devices/{id}/toggle-receive", a.withAdminAuth(a.handleAdminToggleDeviceReceive))
 	mux.HandleFunc("POST /admin/devices/{id}/toggle-disabled", a.withAdminAuth(a.handleAdminToggleDeviceDisabled))
-	mux.HandleFunc("POST /admin/devices/{id}/revoke-token", a.withAdminAuth(a.handleAdminRevokeDeviceToken))
+	mux.HandleFunc("POST /admin/devices/{id}/delete", a.withAdminAuth(a.handleAdminDeleteDevice))
 	mux.HandleFunc("GET /admin/tokens", a.withAdminAuth(a.handleAdminTokens))
 	mux.HandleFunc("POST /admin/tokens/create", a.withAdminAuth(a.handleAdminCreateToken))
 	mux.HandleFunc("POST /admin/tokens/{id}/revoke", a.withAdminAuth(a.handleAdminRevokeToken))

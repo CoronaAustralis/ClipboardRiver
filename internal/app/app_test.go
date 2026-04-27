@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/model"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func TestRegisterSameDeviceUpdatesMetadata(t *testing.T) {
@@ -483,6 +485,35 @@ func TestToggleReceiveStopsRealtimeFanout(t *testing.T) {
 	}
 }
 
+func TestDeleteDeviceRemovesRowAndInvalidatesToken(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+	handler := app.Router()
+
+	code := createEnrollmentToken(t, app, 10)
+	deviceToken := registerDevice(t, handler, app, code, "delete-device-1", "Delete Me")
+
+	var device model.Device
+	if err := app.db.Where("device_uuid = ?", "delete-device-1").First(&device).Error; err != nil {
+		t.Fatalf("find device: %v", err)
+	}
+
+	resp := performAdminPost(t, handler, app, "/admin/devices/"+strconv.Itoa(int(device.ID))+"/delete")
+	if resp.Code != http.StatusFound {
+		t.Fatalf("delete device status = %d, want %d", resp.Code, http.StatusFound)
+	}
+
+	var deleted model.Device
+	if err := app.db.First(&deleted, device.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected device row to be deleted, err=%v, row=%+v", err, deleted)
+	}
+
+	heartbeatResp := performJSON(t, handler, "POST", "/api/v1/client/heartbeat", map[string]any{}, deviceToken)
+	if heartbeatResp.Code != http.StatusUnauthorized {
+		t.Fatalf("deleted device token should fail, status = %d, body=%s", heartbeatResp.Code, heartbeatResp.Body.String())
+	}
+}
+
 func TestHubOnlineStatus(t *testing.T) {
 	hub := NewHub()
 	device := &model.Device{ID: 42}
@@ -829,6 +860,41 @@ func TestAdminHistoryShowsPaginationWhenMultiplePagesExist(t *testing.T) {
 	}
 	if !strings.Contains(secondBody, "history item 0") {
 		t.Fatalf("expected oldest item on second page, body=%s", secondBody)
+	}
+}
+
+func TestAdminHistoryShowsDeletedDeviceLabel(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+	handler := app.Router()
+
+	code := createEnrollmentToken(t, app, 10)
+	deviceToken := registerDevice(t, handler, app, code, "deleted-history-device-1", "History Owner")
+
+	uploadResp := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
+		"client_item_id":    "deleted-history-item-1",
+		"upload_kind":       "history",
+		"client_created_at": time.Now().UTC().Format(time.RFC3339),
+		"text_content":      "saved before delete",
+	}, deviceToken)
+	if uploadResp.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body=%s", uploadResp.Code, uploadResp.Body.String())
+	}
+
+	var device model.Device
+	if err := app.db.Where("device_uuid = ?", "deleted-history-device-1").First(&device).Error; err != nil {
+		t.Fatalf("find device: %v", err)
+	}
+	if err := app.db.Delete(&model.Device{}, device.ID).Error; err != nil {
+		t.Fatalf("delete device: %v", err)
+	}
+
+	page := performAdminGet(t, handler, app, "/admin/history", "en")
+	if page.Code != http.StatusOK {
+		t.Fatalf("history page status = %d, body=%s", page.Code, page.Body.String())
+	}
+	if !strings.Contains(page.Body.String(), "Deleted device") {
+		t.Fatalf("expected deleted device label, body=%s", page.Body.String())
 	}
 }
 

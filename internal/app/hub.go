@@ -87,6 +87,19 @@ func (h *Hub) Close() {
 	}
 }
 
+func (h *Hub) CloseDevice(deviceID uint) {
+	h.mu.RLock()
+	set := h.clients[deviceID]
+	clients := make([]*WSClient, 0, len(set))
+	for client := range set {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	for _, client := range clients {
+		_ = client.Close()
+	}
+}
+
 func (h *Hub) IsOnline(deviceID uint) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

@@ -101,11 +101,13 @@ If the same `device_uuid` registers again:
 - a fresh `device_token` is issued
 - the device is re-enabled if it had been disabled before
 
-If a device token is revoked:
+If a device is deleted from the admin console:
 
-- that token stops working for both HTTP and WebSocket auth
-- the same `device_uuid` can still register again with a usable enrollment code
-- the server treats it as the same device record, not a new device
+- its device row is removed from the database
+- its current token stops working for both HTTP and WebSocket auth
+- historical clipboard items remain in the database
+- history pages show that source as a deleted device
+- the same `device_uuid` can register again later with a usable enrollment code
 
 ### Enrollment Codes
 
@@ -636,7 +638,7 @@ Current admin capabilities:
 - toggle device send permission
 - toggle device receive permission
 - disable or re-enable a device
-- revoke device token
+- delete a device record
 - create and revoke enrollment codes
 - update retention days
 - update global realtime fanout switch
