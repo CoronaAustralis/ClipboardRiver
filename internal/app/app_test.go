@@ -898,6 +898,27 @@ func TestAdminHistoryShowsDeletedDeviceLabel(t *testing.T) {
 	}
 }
 
+func TestAdminDevicesPageIncludesDeleteConfirmation(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+	handler := app.Router()
+
+	code := createEnrollmentToken(t, app, 10)
+	registerDevice(t, handler, app, code, "devices-confirm-1", "Confirm Me")
+
+	page := performAdminGet(t, handler, app, "/admin/devices", "en")
+	if page.Code != http.StatusOK {
+		t.Fatalf("devices page status = %d, body=%s", page.Code, page.Body.String())
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, "data-confirm=") {
+		t.Fatalf("expected delete confirmation attribute, body=%s", body)
+	}
+	if !strings.Contains(body, "Delete this device?") {
+		t.Fatalf("expected delete confirmation message, body=%s", body)
+	}
+}
+
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
