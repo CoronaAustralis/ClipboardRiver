@@ -105,21 +105,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-riv
 ### Docker Compose
 
 ```bash
-docker compose up -d --build
+wget -O docker-compose.yml https://raw.githubusercontent.com/CoronaAustralis/ClipboardRiver/refs/heads/main/compose.yaml && docker compose up -d
 ```
-
-- compose file: `./compose.yaml`
-- host data directory: `./data`
-- container config path: `/app/data/config.json`
-- config, SQLite database, and blob files all live under `/app/data`
-- the first generated admin password is printed to container logs
 
 ### Docker Run
 
-```
-docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server
+```bash
+docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server:latest
 ```
 
+- remote image: `crestfallmax/clipboard-river-server:latest`
 - container config path: `/app/data/config.json`
 - config, SQLite database, and blob files all live under `/app/data`
 - the first generated admin password is printed to container logs

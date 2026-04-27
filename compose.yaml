@@ -1,9 +1,6 @@
 services:
   clipboard-river-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: clipboard-river-server:latest
+    image: crestfallmax/clipboard-river-server:latest
     container_name: clipboard-river-server
     restart: unless-stopped
     ports:
