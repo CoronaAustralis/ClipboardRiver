@@ -104,6 +104,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-riv
 
 ## Docker
 
+### Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+- Compose 文件：`./compose.yaml`
+- 宿主机数据目录：`./data`
+- 容器内配置路径：`/app/data/config.json`
+- 配置、SQLite 数据库和 blob 文件都放在 `/app/data`
+- 首次生成的管理员密码会打印到容器日志中
+
+### Docker Run
+
 ```
 docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server
 ```

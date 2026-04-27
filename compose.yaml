@@ -1,0 +1,12 @@
+services:
+  clipboard-river-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: clipboard-river-server:latest
+    container_name: clipboard-river-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data

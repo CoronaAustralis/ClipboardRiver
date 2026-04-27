@@ -690,6 +690,19 @@ Build:
 docker build -t clipboard-river-server .
 ```
 
+Compose:
+
+```bash
+docker compose up -d --build
+```
+
+Compose defaults:
+
+- compose file: `./compose.yaml`
+- host data directory: `./data`
+- `CBR_CONFIG=./data/config.json`
+- config, SQLite database, and blob files are stored under `/app/data`
+
 Run:
 
 ```powershell
