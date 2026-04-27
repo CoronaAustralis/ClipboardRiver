@@ -43,5 +43,37 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 	); err != nil {
 		return nil, fmt.Errorf("auto migrate: %w", err)
 	}
+	if err := migrateLegacyClipboardSchema(db); err != nil {
+		return nil, fmt.Errorf("migrate legacy schema: %w", err)
+	}
 	return db, nil
+}
+
+func migrateLegacyClipboardSchema(db *gorm.DB) error {
+	accountColumns, err := db.Migrator().ColumnTypes(&model.Account{})
+	if err != nil {
+		return err
+	}
+	hasLegacyImageMax := false
+	hasFileMax := false
+	for _, column := range accountColumns {
+		name := strings.ToLower(column.Name())
+		if name == "image_max_bytes" {
+			hasLegacyImageMax = true
+		}
+		if name == "file_max_bytes" {
+			hasFileMax = true
+		}
+	}
+	if hasLegacyImageMax && hasFileMax {
+		if err := db.Exec("UPDATE accounts SET file_max_bytes = image_max_bytes WHERE file_max_bytes = 0 AND image_max_bytes > 0").Error; err != nil {
+			return err
+		}
+	}
+	if err := db.Model(&model.ClipboardItem{}).
+		Where("content_kind = ?", "image").
+		Update("content_kind", model.ContentKindFile).Error; err != nil {
+		return err
+	}
+	return nil
 }

@@ -1,14 +1,10 @@
 package app
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -248,47 +244,38 @@ func (a *App) createTextClipboardItem(device *model.Device, req textItemRequest)
 	return a.createClipboardItem(device, item)
 }
 
-func (a *App) handleClientImageItem(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleClientFileItem(w http.ResponseWriter, r *http.Request) {
 	device := currentDevice(r)
 	if device == nil {
 		writeError(w, http.StatusUnauthorized, "device not found")
 		return
 	}
-	if err := r.ParseMultipartForm(a.currentAccount().ImageMaxBytes + (1 << 20)); err != nil {
+	if err := r.ParseMultipartForm(a.currentAccount().FileMaxBytes + (1 << 20)); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid multipart form")
 		return
 	}
 
-	req, file, header, err := parseImageMultipart(r.MultipartForm)
+	req, file, header, err := parseFileMultipart(r.MultipartForm)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(io.LimitReader(file, a.currentAccount().ImageMaxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, a.currentAccount().FileMaxBytes+1))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read image failed")
+		writeError(w, http.StatusInternalServerError, "read file failed")
 		return
 	}
-	if int64(len(data)) > a.currentAccount().ImageMaxBytes {
-		writeError(w, http.StatusBadRequest, "image exceeds max size")
+	if int64(len(data)) > a.currentAccount().FileMaxBytes {
+		writeError(w, http.StatusBadRequest, "file exceeds max size")
 		return
 	}
 
 	detectedMime := http.DetectContentType(data)
-	if !strings.HasPrefix(detectedMime, "image/") {
-		writeError(w, http.StatusBadRequest, "uploaded file is not an image")
-		return
-	}
-	if _, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid image data")
-		return
-	}
-
 	blobPath, err := a.blobStore.Save(data, header.Filename, chooseBlobExtension(req.MimeType, detectedMime, header))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store image failed")
+		writeError(w, http.StatusInternalServerError, "store file failed")
 		return
 	}
 
@@ -298,7 +285,7 @@ func (a *App) handleClientImageItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item := model.ClipboardItem{
 		ClientItemID:    req.ClientItemID,
-		ContentKind:     model.ContentKindImage,
+		ContentKind:     model.ContentKindFile,
 		UploadKind:      uploadKind,
 		MimeType:        firstNonEmpty(req.MimeType, detectedMime),
 		BlobPath:        blobPath,
@@ -314,15 +301,15 @@ func (a *App) handleClientImageItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"created": created, "item": formatItemResponse(item)})
 }
 
-type imageMultipartRequest struct {
+type fileMultipartRequest struct {
 	ClientItemID    string
 	UploadKind      string
 	ClientCreatedAt string
 	MimeType        string
 }
 
-func parseImageMultipart(form *multipart.Form) (imageMultipartRequest, multipart.File, *multipart.FileHeader, error) {
-	req := imageMultipartRequest{
+func parseFileMultipart(form *multipart.Form) (fileMultipartRequest, multipart.File, *multipart.FileHeader, error) {
+	req := fileMultipartRequest{
 		ClientItemID:    strings.TrimSpace(firstFormValue(form.Value["client_item_id"])),
 		UploadKind:      strings.TrimSpace(firstFormValue(form.Value["upload_kind"])),
 		ClientCreatedAt: strings.TrimSpace(firstFormValue(form.Value["client_created_at"])),
@@ -362,19 +349,16 @@ func chooseBlobExtension(requested, detected string, header *multipart.FileHeade
 	return ".bin"
 }
 
-func extByMime(mime string) string {
-	switch mime {
-	case "image/png":
-		return ".png"
-	case "image/jpeg":
-		return ".jpg"
-	case "image/gif":
-		return ".gif"
-	case "image/webp":
-		return ".webp"
-	default:
+func extByMime(mimeType string) string {
+	mimeType = strings.TrimSpace(strings.Split(mimeType, ";")[0])
+	if mimeType == "" {
 		return ""
 	}
+	extensions, err := mime.ExtensionsByType(mimeType)
+	if err != nil || len(extensions) == 0 {
+		return ""
+	}
+	return extensions[0]
 }
 
 func firstNonEmpty(values ...string) string {

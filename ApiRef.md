@@ -6,7 +6,7 @@ This document describes the current server behavior implemented in this reposito
 
 Clipboard River Server uses `HTTP + WebSocket`:
 
-- `HTTP` handles registration, profile updates, heartbeat, text upload, image upload, blob download, and admin pages.
+- `HTTP` handles registration, profile updates, heartbeat, text upload, file upload, blob download, and admin pages.
 - `WebSocket` handles realtime delivery to online devices.
 
 v1 is designed for one admin-managed account with multiple client devices.
@@ -18,7 +18,9 @@ Important delivery rules:
 - There is no client API to pull another device's historical clipboard items.
 - If a target device is offline when a realtime item is uploaded, that missed item is not replayed later.
 - Text is delivered directly inside the WebSocket event.
-- Images are delivered as metadata plus `blob_url`; clients then download the binary with HTTP.
+- File items are delivered as metadata only; clients download the binary later with `GET /api/v1/client/items/{id}/blob`.
+- All non-text uploads use `content_kind = "file"`.
+- Files whose `mime_type` starts with `image/` can still be previewed by clients and the admin UI.
 
 ## Runtime And Bootstrap
 
@@ -61,7 +63,7 @@ Current JSON structure:
   },
   "sync": {
     "default_retention_days": 30,
-    "image_max_bytes": 5242880,
+    "file_max_bytes": 5242880,
     "text_batch_limit": 200
   },
   "admin": {
@@ -81,7 +83,7 @@ Supported environment overrides:
 - `CBR_SESSION_SECRET`
 - `CBR_ADMIN_USERNAME`
 - `CBR_RETENTION_DAYS`
-- `CBR_IMAGE_MAX_BYTES`
+- `CBR_FILE_MAX_BYTES`
 - `CBR_TEXT_BATCH_LIMIT`
 
 ## Identity And Authentication
@@ -166,8 +168,8 @@ Base path: `/api/v1/client`
 | `POST` | `/api/v1/client/heartbeat` | Yes | Refresh `last_seen_at` and fetch runtime settings |
 | `POST` | `/api/v1/client/items/text` | Yes | Upload one text clipboard item |
 | `POST` | `/api/v1/client/items/text/batch` | Yes | Upload a batch of text items |
-| `POST` | `/api/v1/client/items/image` | Yes | Upload one image clipboard item |
-| `GET` | `/api/v1/client/items/{id}/blob` | Yes or admin session | Download an image blob |
+| `POST` | `/api/v1/client/items/file` | Yes | Upload one file clipboard item |
+| `GET` | `/api/v1/client/items/{id}/blob` | Yes or admin session | Download a file blob |
 | `GET` | `/api/v1/client/ws` | WebSocket hello auth | Receive realtime events |
 
 There is no `/sync/pull` endpoint in the current server.
@@ -189,7 +191,7 @@ Request:
   "app_version": "1.0.0",
   "capabilities": {
     "supports_text": true,
-    "supports_image": true,
+    "supports_file": true,
     "supports_ws": true,
     "supports_text_batch": true
   }
@@ -205,7 +207,7 @@ Response:
   "settings": {
     "realtime_fanout_enabled": true,
     "retention_days": 30,
-    "image_max_bytes": 5242880,
+    "file_max_bytes": 5242880,
     "text_batch_limit": 200
   },
   "server_cursor": 0
@@ -233,7 +235,7 @@ Request:
   "app_version": "1.2.3",
   "capabilities": {
     "supports_text": true,
-    "supports_image": true,
+    "supports_file": true,
     "supports_ws": true,
     "supports_text_batch": true
   }
@@ -261,7 +263,7 @@ Response:
   "settings": {
     "realtime_fanout_enabled": true,
     "retention_days": 30,
-    "image_max_bytes": 5242880,
+    "file_max_bytes": 5242880,
     "text_batch_limit": 200
   }
 }
@@ -379,9 +381,9 @@ Notes:
 - if batch size exceeds `text_batch_limit`, the whole request is rejected with `400`
 - `history` items are stored but are not fanned out in realtime
 
-### `POST /api/v1/client/items/image`
+### `POST /api/v1/client/items/file`
 
-Uploads one image clipboard item with `multipart/form-data`.
+Uploads one file clipboard item with `multipart/form-data`.
 
 Form fields:
 
@@ -402,16 +404,15 @@ Response:
     "id": 14,
     "server_cursor": 14,
     "source_device_id": 2,
-    "client_item_id": "img-1",
-    "content_kind": "image",
+    "client_item_id": "file-1",
+    "content_kind": "file",
     "upload_kind": "realtime",
-    "mime_type": "image/png",
-    "byte_size": 102400,
+    "mime_type": "text/plain; charset=utf-8",
+    "byte_size": 4096,
     "char_count": 0,
     "client_created_at": "2026-04-09T10:22:00Z",
     "received_at": "2026-04-10T08:02:00Z",
-    "blob_url": "/api/v1/client/items/14/blob",
-    "blob_name": "clip-123-origin name.png"
+    "blob_name": "notes.txt"
   }
 }
 ```
@@ -419,15 +420,18 @@ Response:
 Notes:
 
 - the upload must contain exactly one file
-- the server validates the file as an image
-- the server enforces `image_max_bytes`
-- oversized or invalid image uploads are rejected with `400`
+- the server enforces `file_max_bytes` as the single-file size limit
+- oversized uploads are rejected with `400`
 - the original multipart filename is preserved when possible and returned later as `blob_name`
+- the server does not return `blob_url`; clients download later with `GET /api/v1/client/items/{id}/blob`
+- the server detects the MIME type from file bytes
+- all non-text files are stored with `content_kind = "file"`
+- files whose `mime_type` starts with `image/` remain previewable
 - repeated uploads with the same `client_item_id` are deduplicated
 
 ### `GET /api/v1/client/items/{id}/blob`
 
-Downloads the raw binary content of an image clipboard item.
+Downloads the raw binary content of a file clipboard item.
 
 Behavior:
 
@@ -442,6 +446,11 @@ Clients should use the item metadata for structured fields such as:
 - `mime_type`
 - `byte_size`
 - `blob_name`
+
+Download URL rule:
+
+- use the returned item `id`
+- request `GET /api/v1/client/items/{id}/blob`
 
 ## WebSocket Protocol
 
@@ -481,7 +490,7 @@ Success response:
     "settings": {
       "realtime_fanout_enabled": true,
       "retention_days": 30,
-      "image_max_bytes": 5242880,
+      "file_max_bytes": 5242880,
       "text_batch_limit": 200
     },
     "time": "2026-04-10T08:03:00Z"
@@ -513,7 +522,7 @@ Realtime text example:
 }
 ```
 
-Realtime image example:
+Realtime file example with previewable `mime_type`:
 
 ```json
 {
@@ -522,24 +531,45 @@ Realtime image example:
     "id": 16,
     "server_cursor": 16,
     "source_device_id": 3,
-    "client_item_id": "img-16",
-    "content_kind": "image",
+    "client_item_id": "file-16",
+    "content_kind": "file",
     "upload_kind": "realtime",
     "mime_type": "image/png",
     "byte_size": 102400,
     "char_count": 0,
     "client_created_at": "2026-04-09T10:24:00Z",
     "received_at": "2026-04-10T08:05:00Z",
-    "blob_url": "/api/v1/client/items/16/blob",
     "blob_name": "clip-123-origin name.png"
   }
 }
 ```
 
-For image events, the client then downloads the binary with:
+For file events, the client then downloads the binary with:
 
 ```text
 GET /api/v1/client/items/16/blob
+```
+
+Realtime generic file example:
+
+```json
+{
+  "type": "clipboard.created",
+  "item": {
+    "id": 17,
+    "server_cursor": 17,
+    "source_device_id": 3,
+    "client_item_id": "file-17",
+    "content_kind": "file",
+    "upload_kind": "realtime",
+    "mime_type": "application/pdf",
+    "byte_size": 204800,
+    "char_count": 0,
+    "client_created_at": "2026-04-09T10:25:00Z",
+    "received_at": "2026-04-10T08:06:00Z",
+    "blob_name": "manual.pdf"
+  }
+}
 ```
 
 ### Client Message: `ack`
@@ -601,7 +631,7 @@ Current admin capabilities:
 
 - server-side paginated history browsing
 - filter by device, content kind, and text query
-- image preview and blob download
+- file download plus preview when `mime_type` starts with `image/`
 - device online status based on active WebSocket connections
 - toggle device send permission
 - toggle device receive permission
@@ -610,7 +640,7 @@ Current admin capabilities:
 - create and revoke enrollment codes
 - update retention days
 - update global realtime fanout switch
-- update image size limit
+- update file size limit
 - change admin password
 
 Current history page size:

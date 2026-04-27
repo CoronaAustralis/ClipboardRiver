@@ -1,7 +1,9 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/auth"
 	"github.com/clipboardriver/cb_river_server/internal/model"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 type basePageData struct {
@@ -23,6 +26,34 @@ type basePageData struct {
 }
 
 const minAdminPasswordLength = 8
+
+type historyRow struct {
+	Item       model.ClipboardItem
+	DeviceName string
+	BlobName   string
+	PreviewImg bool
+}
+
+type historyPaginationLink struct {
+	Label  string
+	URL    string
+	Active bool
+	Gap    bool
+}
+
+type historyPaginationData struct {
+	Page           int
+	PageSize       int
+	TotalItems     int64
+	TotalPages     int
+	HasMultiple    bool
+	HasPrev        bool
+	HasNext        bool
+	PrevURL        string
+	NextURL        string
+	Links          []historyPaginationLink
+	CurrentPageURL string
+}
 
 func (a *App) handleAdminLoginPage(w http.ResponseWriter, r *http.Request) {
 	if a.isAdminAuthenticated(r) {
@@ -82,20 +113,38 @@ func (a *App) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 
-	tx := a.db.Model(&model.ClipboardItem{}).Where("account_id = ?", a.account.ID)
+	baseTx := a.db.Model(&model.ClipboardItem{}).Where("account_id = ?", a.account.ID)
 	if deviceID != "" {
-		tx = tx.Where("source_device_id = ?", deviceID)
+		baseTx = baseTx.Where("source_device_id = ?", deviceID)
 	}
 	if kind != "" {
-		tx = tx.Where("content_kind = ?", kind)
+		baseTx = baseTx.Where("content_kind = ?", kind)
 	}
 	if query != "" {
-		tx = tx.Where("text_content LIKE ?", "%"+query+"%")
+		baseTx = baseTx.Where("text_content LIKE ?", "%"+query+"%")
 	}
 
 	var items []model.ClipboardItem
 	const pageSize = 50
-	if err := tx.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+	var totalItems int64
+	if err := baseTx.Session(&gorm.Session{}).Count(&totalItems).Error; err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	totalPages := int((totalItems + int64(pageSize) - 1) / int64(pageSize))
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	if err := baseTx.Session(&gorm.Session{}).
+		Order("id DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&items).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -111,29 +160,116 @@ func (a *App) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
 		deviceNames[device.ID] = name
 	}
 
-	type historyRow struct {
-		Item       model.ClipboardItem
-		DeviceName string
-	}
 	rows := make([]historyRow, 0, len(items))
 	for _, item := range items {
 		rows = append(rows, historyRow{
 			Item:       item,
 			DeviceName: deviceNames[item.SourceDeviceID],
+			BlobName:   fileNameFromPath(item.BlobPath),
+			PreviewImg: item.ContentKind == model.ContentKindFile && strings.HasPrefix(strings.ToLower(item.MimeType), "image/"),
 		})
 	}
 
 	a.render(w, "history", map[string]any{
-		"Base":    a.pageBase(w, r, "page.history", "history"),
-		"Items":   rows,
-		"Devices": devices,
+		"Base":       a.pageBase(w, r, "page.history", "history"),
+		"Items":      rows,
+		"Devices":    devices,
+		"Pagination": buildHistoryPagination(page, pageSize, totalItems, deviceID, kind, query),
 		"Filters": map[string]string{
 			"device_id": deviceID,
 			"kind":      kind,
 			"q":         query,
 		},
-		"Page": page,
 	})
+}
+
+func buildHistoryPagination(page, pageSize int, totalItems int64, deviceID, kind, query string) historyPaginationData {
+	totalPages := int((totalItems + int64(pageSize) - 1) / int64(pageSize))
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	pagination := historyPaginationData{
+		Page:           page,
+		PageSize:       pageSize,
+		TotalItems:     totalItems,
+		TotalPages:     totalPages,
+		HasMultiple:    totalPages > 1,
+		HasPrev:        page > 1,
+		HasNext:        page < totalPages,
+		CurrentPageURL: buildHistoryPageURL(page, deviceID, kind, query),
+	}
+	if pagination.HasPrev {
+		pagination.PrevURL = buildHistoryPageURL(page-1, deviceID, kind, query)
+	}
+	if pagination.HasNext {
+		pagination.NextURL = buildHistoryPageURL(page+1, deviceID, kind, query)
+	}
+
+	addLink := func(targetPage int) {
+		if targetPage < 1 || targetPage > totalPages {
+			return
+		}
+		pagination.Links = append(pagination.Links, historyPaginationLink{
+			Label:  strconv.Itoa(targetPage),
+			URL:    buildHistoryPageURL(targetPage, deviceID, kind, query),
+			Active: targetPage == page,
+		})
+	}
+	addGap := func() {
+		if len(pagination.Links) == 0 || pagination.Links[len(pagination.Links)-1].Gap {
+			return
+		}
+		pagination.Links = append(pagination.Links, historyPaginationLink{
+			Label: "…",
+			Gap:   true,
+		})
+	}
+
+	addLink(1)
+	if totalPages > 1 {
+		start := page - 1
+		if start < 2 {
+			start = 2
+		}
+		end := page + 1
+		if end > totalPages-1 {
+			end = totalPages - 1
+		}
+		if start > 2 {
+			addGap()
+		}
+		for p := start; p <= end; p++ {
+			addLink(p)
+		}
+		if end < totalPages-1 {
+			addGap()
+		}
+		addLink(totalPages)
+	}
+
+	return pagination
+}
+
+func buildHistoryPageURL(page int, deviceID, kind, query string) string {
+	values := url.Values{}
+	if page > 1 {
+		values.Set("page", strconv.Itoa(page))
+	}
+	if deviceID != "" {
+		values.Set("device_id", deviceID)
+	}
+	if kind != "" {
+		values.Set("kind", kind)
+	}
+	if query != "" {
+		values.Set("q", query)
+	}
+	encoded := values.Encode()
+	if encoded == "" {
+		return "/admin/history"
+	}
+	return fmt.Sprintf("/admin/history?%s", encoded)
 }
 
 func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
@@ -324,16 +460,16 @@ func (a *App) handleAdminUpdateSettings(w http.ResponseWriter, r *http.Request) 
 			retentionDays = parsed
 		}
 	}
-	imageMaxBytes := a.account.ImageMaxBytes
-	if value := strings.TrimSpace(r.FormValue("image_max_bytes")); value != "" {
+	fileMaxBytes := a.account.FileMaxBytes
+	if value := strings.TrimSpace(r.FormValue("file_max_bytes")); value != "" {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
-			imageMaxBytes = parsed
+			fileMaxBytes = parsed
 		}
 	}
 	updates := map[string]any{
 		"realtime_fanout_enabled": r.FormValue("realtime_fanout_enabled") == "on",
 		"retention_days":          retentionDays,
-		"image_max_bytes":         imageMaxBytes,
+		"file_max_bytes":          fileMaxBytes,
 	}
 	if err := a.db.Model(&model.Account{}).Where("id = ?", a.account.ID).Updates(updates).Error; err != nil {
 		redirectWithMessage(w, r, "/admin/settings", "save_failed", nil)

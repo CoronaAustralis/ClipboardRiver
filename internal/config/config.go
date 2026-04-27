@@ -37,7 +37,7 @@ type AuthConfig struct {
 
 type SyncConfig struct {
 	DefaultRetentionDays int   `json:"default_retention_days"`
-	ImageMaxBytes        int64 `json:"image_max_bytes"`
+	FileMaxBytes         int64 `json:"file_max_bytes"`
 	TextBatchLimit       int   `json:"text_batch_limit"`
 }
 
@@ -61,7 +61,7 @@ func defaultConfig() Config {
 		},
 		Sync: SyncConfig{
 			DefaultRetentionDays: 30,
-			ImageMaxBytes:        5 * 1024 * 1024,
+			FileMaxBytes:         5 * 1024 * 1024,
 			TextBatchLimit:       200,
 		},
 		Admin: AdminBootstrap{
@@ -92,7 +92,7 @@ func Load() (Config, error) {
 	overrideString(&cfg.Auth.SessionSecret, "CBR_SESSION_SECRET")
 	overrideString(&cfg.Admin.Username, "CBR_ADMIN_USERNAME")
 	overrideInt(&cfg.Sync.DefaultRetentionDays, "CBR_RETENTION_DAYS")
-	overrideInt64(&cfg.Sync.ImageMaxBytes, "CBR_IMAGE_MAX_BYTES")
+	overrideInt64(&cfg.Sync.FileMaxBytes, "CBR_FILE_MAX_BYTES")
 	overrideInt(&cfg.Sync.TextBatchLimit, "CBR_TEXT_BATCH_LIMIT")
 
 	if cfg.Storage.DataDir == "" {
@@ -124,8 +124,8 @@ func Load() (Config, error) {
 	if cfg.Sync.TextBatchLimit <= 0 {
 		cfg.Sync.TextBatchLimit = 200
 	}
-	if cfg.Sync.ImageMaxBytes <= 0 {
-		cfg.Sync.ImageMaxBytes = 5 * 1024 * 1024
+	if cfg.Sync.FileMaxBytes <= 0 {
+		cfg.Sync.FileMaxBytes = 5 * 1024 * 1024
 	}
 	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
 		return Config{}, fmt.Errorf("create data dir: %w", err)

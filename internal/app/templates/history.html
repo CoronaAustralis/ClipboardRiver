@@ -18,11 +18,20 @@
       <select name="kind">
         <option value="">{{ t .Base.T "history.all_kinds" }}</option>
         <option value="text" {{ if eq .Filters.kind "text" }}selected{{ end }}>{{ t .Base.T "history.kind.text" }}</option>
-        <option value="image" {{ if eq .Filters.kind "image" }}selected{{ end }}>{{ t .Base.T "history.kind.image" }}</option>
+        <option value="file" {{ if eq .Filters.kind "file" }}selected{{ end }}>{{ t .Base.T "history.kind.file" }}</option>
       </select>
       <input type="text" name="q" value="{{ .Filters.q }}" placeholder="{{ t .Base.T "history.search_placeholder" }}">
       <button type="submit">{{ t .Base.T "history.filter" }}</button>
     </form>
+    <div class="card-header history-meta">
+      <div>
+        <h2>{{ t .Base.T "history.pagination" }}</h2>
+        <p class="muted">{{ printf (t .Base.T "history.total_items") .Pagination.TotalItems }}</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill">{{ printf (t .Base.T "history.page_info") .Pagination.Page .Pagination.TotalPages }}</span>
+      </div>
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -50,10 +59,17 @@
                 <div class="preview">{{ .Item.TextContent }}</div>
                 <div class="muted">{{ .Item.CharCount }} {{ t $.Base.T "history.chars" }}</div>
               </div>
+              {{ else if .PreviewImg }}
+              <div class="meta-stack">
+                <a href="/api/v1/client/items/{{ .Item.ID }}/blob"><img class="thumb" src="/api/v1/client/items/{{ .Item.ID }}/blob" alt="{{ t $.Base.T "history.kind.file" }}"></a>
+                <div class="muted">{{ .BlobName }}</div>
+                <div class="muted">{{ .Item.MimeType }} · {{ .Item.ByteSize }} bytes</div>
+              </div>
               {{ else }}
               <div class="meta-stack">
-                <a href="/api/v1/client/items/{{ .Item.ID }}/blob"><img class="thumb" src="/api/v1/client/items/{{ .Item.ID }}/blob" alt="{{ t $.Base.T "history.kind.image" }}"></a>
-                <div class="muted">{{ .Item.ByteSize }} bytes</div>
+                <a class="button secondary" href="/api/v1/client/items/{{ .Item.ID }}/blob">{{ t $.Base.T "history.download" }}</a>
+                <div class="muted">{{ .BlobName }}</div>
+                <div class="muted">{{ .Item.MimeType }} · {{ .Item.ByteSize }} bytes</div>
               </div>
               {{ end }}
             </td>
@@ -65,6 +81,31 @@
         </tbody>
       </table>
     </div>
+    {{ if .Pagination.HasMultiple }}
+    <div class="pagination">
+      <div class="pagination-links">
+        {{ if .Pagination.HasPrev }}
+        <a class="pagination-link" href="{{ .Pagination.PrevURL }}">{{ t .Base.T "history.prev_page" }}</a>
+        {{ else }}
+        <span class="pagination-link disabled">{{ t .Base.T "history.prev_page" }}</span>
+        {{ end }}
+        {{ range .Pagination.Links }}
+          {{ if .Gap }}
+          <span class="pagination-gap">{{ .Label }}</span>
+          {{ else if .Active }}
+          <span class="pagination-link active">{{ .Label }}</span>
+          {{ else }}
+          <a class="pagination-link" href="{{ .URL }}">{{ .Label }}</a>
+          {{ end }}
+        {{ end }}
+        {{ if .Pagination.HasNext }}
+        <a class="pagination-link" href="{{ .Pagination.NextURL }}">{{ t .Base.T "history.next_page" }}</a>
+        {{ else }}
+        <span class="pagination-link disabled">{{ t .Base.T "history.next_page" }}</span>
+        {{ end }}
+      </div>
+    </div>
+    {{ end }}
   </div>
 </div>
 {{ template "shell_bottom" . }}

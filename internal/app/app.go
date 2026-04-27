@@ -26,7 +26,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const adminSessionCookie = "cbr_admin_session"
+const (
+	adminSessionCookie   = "cbr_admin_session"
+	adminSessionDuration = 30 * 24 * time.Hour
+)
 
 type App struct {
 	cfg                  config.Config
@@ -44,7 +47,7 @@ type App struct {
 
 type clientCapabilities struct {
 	SupportsText      bool `json:"supports_text"`
-	SupportsImage     bool `json:"supports_image"`
+	SupportsFile      bool `json:"supports_file"`
 	SupportsWS        bool `json:"supports_ws"`
 	SupportsTextBatch bool `json:"supports_text_batch"`
 }
@@ -110,7 +113,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("POST /api/v1/client/heartbeat", a.withDeviceAuth(a.handleClientHeartbeat))
 	mux.HandleFunc("POST /api/v1/client/items/text", a.withDeviceAuth(a.handleClientTextItem))
 	mux.HandleFunc("POST /api/v1/client/items/text/batch", a.withDeviceAuth(a.handleClientTextBatch))
-	mux.HandleFunc("POST /api/v1/client/items/image", a.withDeviceAuth(a.handleClientImageItem))
+	mux.HandleFunc("POST /api/v1/client/items/file", a.withDeviceAuth(a.handleClientFileItem))
 	mux.HandleFunc("GET /api/v1/client/items/{id}/blob", a.handleClientBlob)
 	mux.HandleFunc("GET /api/v1/client/ws", a.handleClientWS)
 
@@ -160,9 +163,14 @@ func seedDefaults(db *gorm.DB, cfg config.Config) (model.Account, *adminBootstra
 				Name:                  "Default",
 				RealtimeFanoutEnabled: true,
 				RetentionDays:         cfg.Sync.DefaultRetentionDays,
-				ImageMaxBytes:         cfg.Sync.ImageMaxBytes,
+				FileMaxBytes:          cfg.Sync.FileMaxBytes,
 			}
 			if err := tx.Create(&account).Error; err != nil {
+				return err
+			}
+		} else if account.FileMaxBytes <= 0 {
+			account.FileMaxBytes = cfg.Sync.FileMaxBytes
+			if err := tx.Model(&account).Update("file_max_bytes", account.FileMaxBytes).Error; err != nil {
 				return err
 			}
 		}
@@ -268,7 +276,7 @@ func decodeCapabilities(raw string) clientCapabilities {
 }
 
 func (a *App) createAdminSession(w http.ResponseWriter, username string) {
-	expiresAt := time.Now().Add(12 * time.Hour)
+	expiresAt := time.Now().Add(adminSessionDuration)
 	value := auth.SignSession(a.cfg.Auth.SessionSecret, username, expiresAt)
 	http.SetCookie(w, &http.Cookie{
 		Name:     adminSessionCookie,
@@ -424,7 +432,7 @@ func (a *App) settingsSnapshot() map[string]any {
 	return map[string]any{
 		"realtime_fanout_enabled": account.RealtimeFanoutEnabled,
 		"retention_days":          account.RetentionDays,
-		"image_max_bytes":         account.ImageMaxBytes,
+		"file_max_bytes":          account.FileMaxBytes,
 		"text_batch_limit":        a.cfg.Sync.TextBatchLimit,
 	}
 }
@@ -473,7 +481,6 @@ func formatItemResponse(item model.ClipboardItem) map[string]any {
 		response["text_content"] = item.TextContent
 	}
 	if item.BlobPath != "" {
-		response["blob_url"] = fmt.Sprintf("/api/v1/client/items/%d/blob", item.ID)
 		response["blob_name"] = fileNameFromPath(item.BlobPath)
 	}
 	return response

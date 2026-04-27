@@ -3,8 +3,8 @@ package model
 import "time"
 
 const (
-	ContentKindText  = "text"
-	ContentKindImage = "image"
+	ContentKindText = "text"
+	ContentKindFile = "file"
 
 	UploadKindRealtime = "realtime"
 	UploadKindHistory  = "history"
@@ -15,7 +15,7 @@ type Account struct {
 	Name                  string
 	RealtimeFanoutEnabled bool
 	RetentionDays         int
-	ImageMaxBytes         int64
+	FileMaxBytes          int64
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 }

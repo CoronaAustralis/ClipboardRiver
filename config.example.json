@@ -13,7 +13,7 @@
   },
   "sync": {
     "default_retention_days": 30,
-    "image_max_bytes": 5242880,
+    "file_max_bytes": 5242880,
     "text_batch_limit": 200
   }
 }

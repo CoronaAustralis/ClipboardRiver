@@ -30,7 +30,7 @@ That seamless experience is the core value of the project.
 
 - Fast: realtime delivery with very little delay
 - Low-friction: designed to feel like the clipboard is simply shared
-- Practical: supports both text and images
+- Practical: supports text and single-file clipboard sync
 - Controlled: self-hosted server with device management and history browsing
 - Cross-platform: Windows is the smoothest experience today, Android is already available, and iOS is planned for a future version
 
@@ -58,9 +58,8 @@ If you want to build your own client before then, use [ApiRef.md](./ApiRef.md) a
 
 - The best seamless experience today is still Windows to Windows while both devices are online.
 - On Windows, file-copy capture currently triggers only when exactly one file is copied.
-- That file-copy path currently supports image files only.
-- Image files are currently identified by file extension, not by deep file-type inspection before capture.
-- Multi-file copy, folders, and general non-image file sync are not supported yet.
+- Multi-file copy and folder copy are not supported yet.
+- Non-text clipboard sync currently uses a single-file upload path; files whose MIME starts with `image/` get inline preview in the admin UI.
 - Rich text, HTML fragments, and complex Office-style clipboard payloads are not supported yet.
 - Android works, but it is naturally less frictionless than the Windows-to-Windows flow because of platform restrictions.
 
@@ -71,7 +70,7 @@ This repository contains the server:
 - device registration
 - realtime message fanout
 - clipboard history storage
-- image blob storage
+- file blob storage
 - admin console
 - Docker-friendly deployment
 

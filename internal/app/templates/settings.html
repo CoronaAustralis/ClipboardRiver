@@ -24,8 +24,8 @@
           <input type="number" name="retention_days" min="0" value="{{ .Account.RetentionDays }}">
         </div>
         <div>
-          <label>{{ t .Base.T "settings.image_max_bytes" }}</label>
-          <input type="number" name="image_max_bytes" min="1" value="{{ .Account.ImageMaxBytes }}">
+          <label>{{ t .Base.T "settings.file_max_bytes" }}</label>
+          <input type="number" name="file_max_bytes" min="1" value="{{ .Account.FileMaxBytes }}">
         </div>
         <div><button type="submit">{{ t .Base.T "settings.save" }}</button></div>
       </form>

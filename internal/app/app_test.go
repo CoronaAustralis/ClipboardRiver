@@ -112,6 +112,41 @@ func TestAdminLoginPageDefaultsToChinese(t *testing.T) {
 	}
 }
 
+func TestAdminLoginCreatesThirtyDaySession(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+
+	form := url.Values{
+		"username": {"admin"},
+		"password": {"password"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+	before := time.Now()
+	app.Router().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want %d", recorder.Code, http.StatusFound)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == adminSessionCookie {
+			sessionCookie = cookie
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("expected %s cookie to be set", adminSessionCookie)
+	}
+
+	remaining := sessionCookie.Expires.Sub(before)
+	if remaining < 29*24*time.Hour || remaining > 31*24*time.Hour {
+		t.Fatalf("session cookie lifetime = %s, want about 30 days", remaining)
+	}
+}
+
 func TestNewAppGeneratesInitialAdminPassword(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Config{
@@ -129,7 +164,7 @@ func TestNewAppGeneratesInitialAdminPassword(t *testing.T) {
 		},
 		Sync: config.SyncConfig{
 			DefaultRetentionDays: 30,
-			ImageMaxBytes:        2 * 1024 * 1024,
+			FileMaxBytes:         2 * 1024 * 1024,
 			TextBatchLimit:       20,
 		},
 		Admin: config.AdminBootstrap{
@@ -178,7 +213,7 @@ func TestProfileUpdateAndIdempotentTextUpload(t *testing.T) {
 		"os_version":   "15",
 		"platform":     "mobile",
 		"app_version":  "2.0.0",
-		"capabilities": map[string]any{"supports_text": true, "supports_image": true, "supports_ws": true},
+		"capabilities": map[string]any{"supports_text": true, "supports_file": true, "supports_ws": true},
 	}, deviceToken)
 	if profileResp.Code != http.StatusOK {
 		t.Fatalf("profile update status = %d, body=%s", profileResp.Code, profileResp.Body.String())
@@ -191,10 +226,25 @@ func TestProfileUpdateAndIdempotentTextUpload(t *testing.T) {
 	if source.Nickname != "Phone Updated" || source.OSVersion != "15" {
 		t.Fatalf("profile not updated: %+v", source)
 	}
+	if !strings.Contains(source.CapabilitiesJSON, `"supports_file":true`) {
+		t.Fatalf("capabilities missing supports_file: %s", source.CapabilitiesJSON)
+	}
 
 	heartbeatResp := performJSON(t, handler, "POST", "/api/v1/client/heartbeat", map[string]any{}, deviceToken)
 	if heartbeatResp.Code != http.StatusOK {
 		t.Fatalf("heartbeat status = %d, body=%s", heartbeatResp.Code, heartbeatResp.Body.String())
+	}
+	var heartbeatPayload struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(heartbeatResp.Body.Bytes(), &heartbeatPayload); err != nil {
+		t.Fatalf("decode heartbeat response: %v", err)
+	}
+	if _, ok := heartbeatPayload.Settings["file_max_bytes"]; !ok {
+		t.Fatalf("expected file_max_bytes in heartbeat settings: %#v", heartbeatPayload.Settings)
+	}
+	if got := len(heartbeatPayload.Settings); got != 4 {
+		t.Fatalf("unexpected heartbeat settings field count = %d, settings=%#v", got, heartbeatPayload.Settings)
 	}
 
 	body := map[string]any{
@@ -497,15 +547,15 @@ func TestTextBatchReturnsPartialResults(t *testing.T) {
 	}
 }
 
-func TestImageUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T) {
+func TestFileUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T) {
 	app := newTestApp(t)
 	defer func() { _ = app.Close() }()
 
 	code := createEnrollmentToken(t, app, 10)
 	handler := app.Router()
-	deviceToken := registerDevice(t, handler, app, code, "image-1", "Imager")
+	deviceToken := registerDevice(t, handler, app, code, "preview-file-1", "Previewer")
 
-	imageData := []byte{
+	previewableFileData := []byte{
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
@@ -517,20 +567,26 @@ func TestImageUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T
 		0x44, 0xae, 0x42, 0x60, 0x82,
 	}
 
-	resp := performMultipartImageUpload(t, handler, "/api/v1/client/items/image", deviceToken, map[string]string{
-		"client_item_id":    "img-item-1",
+	resp := performMultipartFileUpload(t, handler, "/api/v1/client/items/file", deviceToken, map[string]string{
+		"client_item_id":    "file-item-1",
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
-	}, "clip-123-origin name.png", imageData)
+	}, "clip-123-origin name.png", previewableFileData)
 	if resp.Code != http.StatusOK {
-		t.Fatalf("image upload status = %d, body=%s", resp.Code, resp.Body.String())
+		t.Fatalf("file upload status = %d, body=%s", resp.Code, resp.Body.String())
 	}
 
 	var payload struct {
 		Item map[string]any `json:"item"`
 	}
 	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode image upload response: %v", err)
+		t.Fatalf("decode file upload response: %v", err)
+	}
+	if got := payload.Item["content_kind"]; got != model.ContentKindFile {
+		t.Fatalf("content_kind = %#v, want %q", got, model.ContentKindFile)
+	}
+	if _, ok := payload.Item["blob_url"]; ok {
+		t.Fatalf("blob_url should not be returned: %#v", payload.Item)
 	}
 	if got := payload.Item["blob_name"]; got != "clip-123-origin name.png" {
 		t.Fatalf("blob_name = %#v, want %q", got, "clip-123-origin name.png")
@@ -547,8 +603,50 @@ func TestImageUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T
 	if got := blobResp.Header().Get("Content-Disposition"); !strings.Contains(got, `inline; filename="clip-123-origin name.png"`) {
 		t.Fatalf("content-disposition = %q", got)
 	}
-	if !bytes.Equal(blobResp.Body.Bytes(), imageData) {
+	if !bytes.Equal(blobResp.Body.Bytes(), previewableFileData) {
 		t.Fatalf("blob body mismatch")
+	}
+}
+
+func TestNonImageFileUploadAcceptedOnFileEndpoint(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+
+	code := createEnrollmentToken(t, app, 10)
+	handler := app.Router()
+	deviceToken := registerDevice(t, handler, app, code, "file-1", "File User")
+
+	fileData := []byte("hello from clipboard river")
+	resp := performMultipartFileUpload(t, handler, "/api/v1/client/items/file", deviceToken, map[string]string{
+		"client_item_id":    "file-item-1",
+		"upload_kind":       "history",
+		"client_created_at": time.Now().UTC().Format(time.RFC3339),
+	}, "notes.txt", fileData)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("file upload status = %d, body=%s", resp.Code, resp.Body.String())
+	}
+
+	var payload struct {
+		Item map[string]any `json:"item"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode file upload response: %v", err)
+	}
+	if got := payload.Item["content_kind"]; got != model.ContentKindFile {
+		t.Fatalf("content_kind = %#v, want %q", got, model.ContentKindFile)
+	}
+	if got := payload.Item["upload_kind"]; got != model.UploadKindHistory {
+		t.Fatalf("upload_kind = %#v, want %q", got, model.UploadKindHistory)
+	}
+	if _, ok := payload.Item["blob_url"]; ok {
+		t.Fatalf("blob_url should not be returned: %#v", payload.Item)
+	}
+	if got := payload.Item["blob_name"]; got != "notes.txt" {
+		t.Fatalf("blob_name = %#v, want %q", got, "notes.txt")
+	}
+	mimeType, _ := payload.Item["mime_type"].(string)
+	if !strings.HasPrefix(mimeType, "text/plain") {
+		t.Fatalf("mime_type = %q, want text/plain*", mimeType)
 	}
 }
 
@@ -653,6 +751,87 @@ func TestAdminCanChangePasswordFromSettings(t *testing.T) {
 	}
 }
 
+func TestAdminSettingsAcceptFileMaxBytes(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+
+	handler := app.Router()
+	resp := performAdminFormPost(t, handler, app, "/admin/settings", url.Values{
+		"realtime_fanout_enabled": {"on"},
+		"retention_days":          {strconv.Itoa(app.account.RetentionDays)},
+		"file_max_bytes":          {"111111"},
+	})
+	if resp.Code != http.StatusFound {
+		t.Fatalf("settings update status = %d, body=%s", resp.Code, resp.Body.String())
+	}
+
+	var account model.Account
+	if err := app.db.First(&account, app.account.ID).Error; err != nil {
+		t.Fatalf("load account after file_max_bytes update: %v", err)
+	}
+	if account.FileMaxBytes != 111111 {
+		t.Fatalf("file_max_bytes after update = %d, want %d", account.FileMaxBytes, 111111)
+	}
+}
+
+func TestAdminHistoryShowsPaginationWhenMultiplePagesExist(t *testing.T) {
+	app := newTestApp(t)
+	defer func() { _ = app.Close() }()
+
+	code := createEnrollmentToken(t, app, 10)
+	handler := app.Router()
+	registerDevice(t, handler, app, code, "history-device-1", "History Device")
+
+	var device model.Device
+	if err := app.db.Where("device_uuid = ?", "history-device-1").First(&device).Error; err != nil {
+		t.Fatalf("find history device: %v", err)
+	}
+
+	now := time.Now().UTC()
+	items := make([]model.ClipboardItem, 0, 51)
+	for i := 0; i < 51; i++ {
+		items = append(items, model.ClipboardItem{
+			AccountID:       app.account.ID,
+			SourceDeviceID:  device.ID,
+			ClientItemID:    "hist-item-" + strconv.Itoa(i),
+			ContentKind:     model.ContentKindText,
+			UploadKind:      model.UploadKindHistory,
+			TextContent:     "history item " + strconv.Itoa(i),
+			CharCount:       len("history item ") + len(strconv.Itoa(i)),
+			ByteSize:        int64(len("history item ") + len(strconv.Itoa(i))),
+			ClientCreatedAt: now.Add(time.Duration(i) * time.Second),
+			ReceivedAt:      now.Add(time.Duration(i) * time.Second),
+		})
+	}
+	if err := app.db.Create(&items).Error; err != nil {
+		t.Fatalf("create history items: %v", err)
+	}
+
+	firstPage := performAdminGet(t, handler, app, "/admin/history", "en")
+	if firstPage.Code != http.StatusOK {
+		t.Fatalf("history first page status = %d, body=%s", firstPage.Code, firstPage.Body.String())
+	}
+	firstBody := firstPage.Body.String()
+	if !strings.Contains(firstBody, "Page 1 / 2") {
+		t.Fatalf("expected first page pagination summary, body=%s", firstBody)
+	}
+	if !strings.Contains(firstBody, "/admin/history?page=2") {
+		t.Fatalf("expected link to page 2, body=%s", firstBody)
+	}
+
+	secondPage := performAdminGet(t, handler, app, "/admin/history?page=2", "en")
+	if secondPage.Code != http.StatusOK {
+		t.Fatalf("history second page status = %d, body=%s", secondPage.Code, secondPage.Body.String())
+	}
+	secondBody := secondPage.Body.String()
+	if !strings.Contains(secondBody, "Page 2 / 2") {
+		t.Fatalf("expected second page pagination summary, body=%s", secondBody)
+	}
+	if !strings.Contains(secondBody, "history item 0") {
+		t.Fatalf("expected oldest item on second page, body=%s", secondBody)
+	}
+}
+
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
@@ -671,7 +850,7 @@ func newTestApp(t *testing.T) *App {
 		},
 		Sync: config.SyncConfig{
 			DefaultRetentionDays: 30,
-			ImageMaxBytes:        2 * 1024 * 1024,
+			FileMaxBytes:         2 * 1024 * 1024,
 			TextBatchLimit:       20,
 		},
 		Admin: config.AdminBootstrap{
@@ -786,6 +965,24 @@ func performAdminFormPost(t *testing.T, handler http.Handler, app *App, path str
 	return recorder
 }
 
+func performAdminGet(t *testing.T, handler http.Handler, app *App, path, acceptLanguage string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if acceptLanguage != "" {
+		req.Header.Set("Accept-Language", acceptLanguage)
+	}
+	session := auth.SignSession(app.cfg.Auth.SessionSecret, app.cfg.Admin.Username, time.Now().Add(1*time.Hour))
+	req.AddCookie(&http.Cookie{
+		Name:  adminSessionCookie,
+		Value: session,
+		Path:  "/",
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	return recorder
+}
+
 func connectClientWS(t *testing.T, serverURL, deviceToken, deviceUUID string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + "/api/v1/client/ws"
@@ -817,7 +1014,7 @@ func connectClientWS(t *testing.T, serverURL, deviceToken, deviceUUID string) *w
 	return conn
 }
 
-func performMultipartImageUpload(t *testing.T, handler http.Handler, path, token string, fields map[string]string, fileName string, fileData []byte) *httptest.ResponseRecorder {
+func performMultipartFileUpload(t *testing.T, handler http.Handler, path, token string, fields map[string]string, fileName string, fileData []byte) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var body bytes.Buffer
