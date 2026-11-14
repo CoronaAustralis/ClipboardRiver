@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,9 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 type Hub struct {
 	mu      sync.RWMutex
@@ -25,8 +24,15 @@ type WSClient struct {
 	app       *App
 	conn      *websocket.Conn
 	device    *model.Device
-	send      chan []byte
+	send      chan wsMessage
+	done      chan struct{}
 	closeOnce sync.Once
+}
+
+type wsMessage struct {
+	Type    string
+	Payload any
+	Item    *model.ClipboardItem
 }
 
 type wsEnvelope struct {
@@ -34,20 +40,19 @@ type wsEnvelope struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-func NewHub() *Hub {
-	return &Hub{clients: make(map[uint]map[*WSClient]struct{})}
-}
+func NewHub() *Hub { return &Hub{clients: make(map[uint]map[*WSClient]struct{})} }
 
-func (h *Hub) Register(client *WSClient) {
+func (h *Hub) Register(client *WSClient) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return
+		return false
 	}
 	if h.clients[client.device.ID] == nil {
 		h.clients[client.device.ID] = make(map[*WSClient]struct{})
 	}
 	h.clients[client.device.ID][client] = struct{}{}
+	return true
 }
 
 func (h *Hub) Unregister(client *WSClient) {
@@ -60,38 +65,33 @@ func (h *Hub) Unregister(client *WSClient) {
 	}
 }
 
-func (h *Hub) Push(deviceID uint, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
+func (h *Hub) Push(deviceID uint, payload wsMessage) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for client := range h.clients[deviceID] {
-		select {
-		case client.send <- data:
-		default:
-			go client.Close()
-		}
+		client.queue(payload)
 	}
 }
 
 func (h *Hub) Close() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.closed = true
+	var clients []*WSClient
 	for _, set := range h.clients {
 		for client := range set {
-			go client.Close()
+			clients = append(clients, client)
 		}
+	}
+	h.mu.Unlock()
+	for _, client := range clients {
+		_ = client.Close()
 	}
 }
 
 func (h *Hub) CloseDevice(deviceID uint) {
 	h.mu.RLock()
-	set := h.clients[deviceID]
-	clients := make([]*WSClient, 0, len(set))
-	for client := range set {
+	clients := make([]*WSClient, 0, len(h.clients[deviceID]))
+	for client := range h.clients[deviceID] {
 		clients = append(clients, client)
 	}
 	h.mu.RUnlock()
@@ -112,66 +112,48 @@ func serveWebSocket(app *App, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(1 << 20)
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
-
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(60 * time.Second)) })
 	var hello wsEnvelope
 	if err := conn.ReadJSON(&hello); err != nil || hello.Type != "hello" {
-		_ = conn.WriteJSON(map[string]any{"type": "error", "error": "first websocket message must be hello"})
 		_ = conn.Close()
 		return
 	}
-
 	var payload struct {
 		DeviceToken string `json:"device_token"`
 		DeviceUUID  string `json:"device_uuid"`
-		LastCursor  uint   `json:"last_cursor"`
 	}
-	if err := json.Unmarshal(hello.Payload, &payload); err != nil {
-		_ = conn.WriteJSON(map[string]any{"type": "error", "error": "invalid hello payload"})
+	decoder := json.NewDecoder(bytes.NewReader(hello.Payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil || payload.DeviceToken == "" || payload.DeviceUUID == "" {
 		_ = conn.Close()
 		return
 	}
+	// Authentication and registration share the lock with token rotation and device revocation.
+	app.stateMu.Lock()
 	req := &http.Request{Header: http.Header{"Authorization": []string{"Bearer " + payload.DeviceToken}}}
 	device, err := app.authenticateDevice(req)
 	if err != nil || device.DeviceUUID != payload.DeviceUUID {
-		_ = conn.WriteJSON(map[string]any{"type": "error", "error": "authentication failed"})
+		app.stateMu.Unlock()
 		_ = conn.Close()
 		return
 	}
-	if payload.LastCursor > 0 {
-		app.updateDeviceAck(device.ID, payload.LastCursor)
+	client := &WSClient{app: app, conn: conn, device: device, send: make(chan wsMessage, 32), done: make(chan struct{})}
+	client.queue(wsMessage{Type: "hello_ack", Payload: map[string]any{"device_id": device.ID, "settings": app.settingsSnapshot(), "time": time.Now().UTC()}})
+	registered := app.hub.Register(client)
+	app.stateMu.Unlock()
+	if !registered {
+		_ = client.Close()
+		return
 	}
-
-	client := &WSClient{
-		app:    app,
-		conn:   conn,
-		device: device,
-		send:   make(chan []byte, 32),
-	}
-	app.hub.Register(client)
-	client.queue(map[string]any{
-		"type": "hello_ack",
-		"payload": map[string]any{
-			"device_id": device.ID,
-			"settings":  app.settingsSnapshot(),
-			"time":      time.Now().UTC(),
-		},
-	})
 	go client.writeLoop()
 	client.readLoop()
 }
 
-func (c *WSClient) queue(payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
+func (c *WSClient) queue(payload wsMessage) {
 	select {
-	case c.send <- data:
+	case <-c.done:
+	case c.send <- payload:
 	default:
 		go c.Close()
 	}
@@ -179,23 +161,60 @@ func (c *WSClient) queue(payload any) {
 
 func (c *WSClient) readLoop() {
 	defer c.Close()
-	for {
-		var msg wsEnvelope
-		if err := c.conn.ReadJSON(&msg); err != nil {
-			return
-		}
-		switch msg.Type {
-		case "ack":
-			var payload struct {
-				ServerCursor uint `json:"server_cursor"`
-			}
-			if err := json.Unmarshal(msg.Payload, &payload); err == nil && payload.ServerCursor > 0 {
-				c.app.updateDeviceAck(c.device.ID, payload.ServerCursor)
-			}
-		case "ping":
-			c.queue(map[string]any{"type": "pong"})
-		}
+	// hello is the only application message. NextReader continues to process standard
+	// WebSocket control frames until the connection closes or unsupported data arrives.
+	_, _, _ = c.conn.NextReader()
+}
+
+func (c *WSClient) writeMessage(message wsMessage) error {
+	c.app.stateMu.Lock()
+	defer c.app.stateMu.Unlock()
+	var device model.Device
+	if err := c.app.db.Where("id = ? AND device_token_hash = ? AND deleted = ?", c.device.ID, c.device.DeviceTokenHash, false).First(&device).Error; err != nil {
+		return err
 	}
+	payload := map[string]any{"type": message.Type}
+	switch message.Type {
+	case "hello_ack":
+		payload["payload"] = message.Payload
+	case "clipboard.created":
+		if !device.ReceiveRealtimeEnabled || message.Item == nil {
+			return nil
+		}
+		item := *message.Item
+		if item.AccountID != device.AccountID || item.SourceDeviceID == device.ID || item.UploadKind != model.UploadKindRealtime {
+			return nil
+		}
+		if item.ExpiresAt != nil && !time.Now().Before(*item.ExpiresAt) {
+			return nil
+		}
+		var source model.Device
+		if err := c.app.db.Where("account_id = ? AND deleted = ? AND send_realtime_enabled = ?", device.AccountID, false, true).First(&source, item.SourceDeviceID).Error; err != nil {
+			return nil
+		}
+		payload["item"] = formatItemResponse(item)
+	case "clipboard.sync_changed":
+		if !device.ReceiveRealtimeEnabled {
+			return nil
+		}
+		if err := c.app.ensureTextWindowLocked(); err != nil {
+			return err
+		}
+		items, err := c.app.visibleTextItemsLocked(&device)
+		if err != nil {
+			return err
+		}
+		ids := make([]uint, 0, len(items))
+		for _, item := range items {
+			ids = append(ids, item.ID)
+		}
+		payload["payload"] = map[string]any{"item_ids": ids}
+	default:
+		return nil
+	}
+	// Keep permission changes and the actual send ordered; stale queued events cannot bypass revocation.
+	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return c.conn.WriteJSON(payload)
 }
 
 func (c *WSClient) writeLoop() {
@@ -204,17 +223,15 @@ func (c *WSClient) writeLoop() {
 	defer c.Close()
 	for {
 		select {
-		case payload, ok := <-c.send:
-			if !ok {
-				return
-			}
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		case <-c.done:
+			return
+		case payload := <-c.send:
+			if err := c.writeMessage(payload); err != nil {
 				return
 			}
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := c.conn.WriteMessage(websocket.PingMessage, []byte("ping")); err != nil {
+			_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
@@ -225,7 +242,7 @@ func (c *WSClient) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		c.app.hub.Unregister(c)
-		close(c.send)
+		close(c.done)
 		err = c.conn.Close()
 	})
 	if err == nil || errors.Is(err, websocket.ErrCloseSent) {

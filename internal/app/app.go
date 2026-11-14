@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"path/filepath"
@@ -23,7 +25,6 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/store"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -40,19 +41,19 @@ type App struct {
 	account              model.Account
 	initialAdminUsername string
 	initialAdminPassword string
-	cleanupMu            sync.Mutex
+	stateMu              sync.Mutex
+	textWindow           []model.ClipboardItem
+	windowErr            error
+	enrollment           enrollmentWindow
+	cleanupDone          chan struct{}
 	cleanupCtx           context.Context
 	cancel               context.CancelFunc
 }
 
-type clientCapabilities struct {
-	SupportsText      bool `json:"supports_text"`
-	SupportsFile      bool `json:"supports_file"`
-	SupportsWS        bool `json:"supports_ws"`
-	SupportsTextBatch bool `json:"supports_text_batch"`
-}
-
 func New(cfg config.Config) (*App, error) {
+	if cfg.Sync.FileMaxBytes < -1 || cfg.Sync.TextBatchLimit <= 0 {
+		return nil, errors.New("invalid file_max_bytes or text_batch_limit")
+	}
 	db, err := store.Open(cfg)
 	if err != nil {
 		return nil, err
@@ -70,21 +71,28 @@ func New(cfg config.Config) (*App, error) {
 
 	cleanupCtx, cancel := context.WithCancel(context.Background())
 	app := &App{
-		cfg:        cfg,
-		db:         db,
-		blobStore:  blob.New(cfg.Storage.BlobDir),
-		hub:        NewHub(),
-		templates:  tpl,
-		account:    account,
-		cleanupCtx: cleanupCtx,
-		cancel:     cancel,
+		cfg:         cfg,
+		db:          db,
+		blobStore:   blob.New(cfg.Storage.BlobDir),
+		hub:         NewHub(),
+		templates:   tpl,
+		account:     account,
+		cleanupCtx:  cleanupCtx,
+		cancel:      cancel,
+		cleanupDone: make(chan struct{}),
 	}
 	if bootstrap != nil {
 		app.initialAdminUsername = bootstrap.Username
 		app.initialAdminPassword = bootstrap.Password
 	}
 
-	go app.runCleanup(cleanupCtx)
+	if _, err := app.refreshTextWindowLocked(); err != nil {
+		cancel()
+		sqlDB, _ := db.DB()
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("initialize text window: %w", err)
+	}
+	go func() { defer close(app.cleanupDone); app.runCleanup(cleanupCtx) }()
 	return app, nil
 }
 
@@ -95,6 +103,8 @@ type adminBootstrapResult struct {
 
 func (a *App) Close() error {
 	a.cancel()
+	<-a.cleanupDone
+	a.enrollment.close()
 	a.hub.Close()
 	sqlDB, err := a.db.DB()
 	if err != nil {
@@ -110,11 +120,11 @@ func (a *App) Router() http.Handler {
 
 	mux.HandleFunc("POST /api/v1/client/register", a.handleClientRegister)
 	mux.HandleFunc("POST /api/v1/client/device/profile", a.withDeviceAuth(a.handleClientProfile))
-	mux.HandleFunc("POST /api/v1/client/heartbeat", a.withDeviceAuth(a.handleClientHeartbeat))
 	mux.HandleFunc("POST /api/v1/client/items/text", a.withDeviceAuth(a.handleClientTextItem))
 	mux.HandleFunc("POST /api/v1/client/items/text/batch", a.withDeviceAuth(a.handleClientTextBatch))
-	mux.HandleFunc("POST /api/v1/client/items/file", a.withDeviceAuth(a.handleClientFileItem))
-	mux.HandleFunc("GET /api/v1/client/items/{id}/blob", a.handleClientBlob)
+	mux.HandleFunc("POST /api/v1/client/items/file", a.handleClientFileItem)
+	mux.HandleFunc("GET /api/v1/client/items/{item_id}/blob", a.handleClientBlob)
+	mux.HandleFunc("POST /api/v1/client/sync/text", a.withDeviceAuth(a.handleClientTextSync))
 	mux.HandleFunc("GET /api/v1/client/ws", a.handleClientWS)
 
 	mux.HandleFunc("GET /admin/login", a.handleAdminLoginPage)
@@ -124,11 +134,10 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("GET /admin/devices", a.withAdminAuth(a.handleAdminDevices))
 	mux.HandleFunc("POST /admin/devices/{id}/toggle-send", a.withAdminAuth(a.handleAdminToggleDeviceSend))
 	mux.HandleFunc("POST /admin/devices/{id}/toggle-receive", a.withAdminAuth(a.handleAdminToggleDeviceReceive))
-	mux.HandleFunc("POST /admin/devices/{id}/toggle-disabled", a.withAdminAuth(a.handleAdminToggleDeviceDisabled))
 	mux.HandleFunc("POST /admin/devices/{id}/delete", a.withAdminAuth(a.handleAdminDeleteDevice))
 	mux.HandleFunc("GET /admin/tokens", a.withAdminAuth(a.handleAdminTokens))
-	mux.HandleFunc("POST /admin/tokens/create", a.withAdminAuth(a.handleAdminCreateToken))
-	mux.HandleFunc("POST /admin/tokens/{id}/revoke", a.withAdminAuth(a.handleAdminRevokeToken))
+	mux.HandleFunc("POST /admin/tokens/open", a.withAdminAuth(a.handleAdminOpenEnrollment))
+	mux.HandleFunc("POST /admin/tokens/close", a.withAdminAuth(a.handleAdminCloseEnrollment))
 	mux.HandleFunc("GET /admin/settings", a.withAdminAuth(a.handleAdminSettings))
 	mux.HandleFunc("POST /admin/settings", a.withAdminAuth(a.handleAdminUpdateSettings))
 	mux.HandleFunc("POST /admin/settings/password", a.withAdminAuth(a.handleAdminChangePassword))
@@ -160,19 +169,15 @@ func seedDefaults(db *gorm.DB, cfg config.Config) (model.Account, *adminBootstra
 				return err
 			}
 			account = model.Account{
-				Name:                  "Default",
-				RealtimeFanoutEnabled: true,
-				RetentionDays:         cfg.Sync.DefaultRetentionDays,
-				FileMaxBytes:          cfg.Sync.FileMaxBytes,
+				Name:          "Default",
+				RetentionDays: cfg.Sync.DefaultRetentionDays,
+				FileMaxBytes:  cfg.Sync.FileMaxBytes,
 			}
 			if err := tx.Create(&account).Error; err != nil {
 				return err
 			}
-		} else if account.FileMaxBytes <= 0 {
-			account.FileMaxBytes = cfg.Sync.FileMaxBytes
-			if err := tx.Model(&account).Update("file_max_bytes", account.FileMaxBytes).Error; err != nil {
-				return err
-			}
+		} else if account.FileMaxBytes < -1 {
+			return errors.New("stored file_max_bytes must be -1, 0, or positive")
 		}
 
 		var admin model.AdminUser
@@ -236,15 +241,24 @@ func writeError(w http.ResponseWriter, status int, message string) {
 func decodeJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("expected one JSON object")
+	}
+	return nil
 }
 
-func clientTimeOrNow(raw string) time.Time {
+func clientTimeOrNow(raw string, now time.Time) (time.Time, error) {
+	if raw == "" {
+		return now, nil
+	}
 	parsed, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return time.Now().UTC()
+		return time.Time{}, errors.New("invalid client_created_at")
 	}
-	return parsed.UTC()
+	return parsed.UTC(), nil
 }
 
 func parsePositiveInt(raw string, fallback int) int {
@@ -262,17 +276,6 @@ func (a *App) retentionExpiry(now time.Time) *time.Time {
 	}
 	expiresAt := now.Add(time.Duration(account.RetentionDays) * 24 * time.Hour)
 	return &expiresAt
-}
-
-func encodeCapabilities(c clientCapabilities) string {
-	data, _ := json.Marshal(c)
-	return string(data)
-}
-
-func decodeCapabilities(raw string) clientCapabilities {
-	var caps clientCapabilities
-	_ = json.Unmarshal([]byte(raw), &caps)
-	return caps
 }
 
 func (a *App) createAdminSession(w http.ResponseWriter, username string) {
@@ -332,6 +335,8 @@ const deviceContextKey requestContextKey = "device"
 
 func (a *App) withDeviceAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		a.stateMu.Lock()
+		defer a.stateMu.Unlock()
 		device, err := a.authenticateDevice(r)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "invalid device token")
@@ -352,7 +357,7 @@ func (a *App) authenticateDevice(r *http.Request) (*model.Device, error) {
 	}
 
 	var device model.Device
-	if err := a.db.Where("device_token_hash = ? AND disabled = ?", auth.HashToken(token), false).First(&device).Error; err != nil {
+	if err := a.db.Where("device_token_hash = ? AND deleted = ?", auth.HashToken(token), false).First(&device).Error; err != nil {
 		return nil, err
 	}
 
@@ -399,18 +404,11 @@ func fileNameFromPath(path string) string {
 	return filepath.Base(path)
 }
 
-func (a *App) updateDeviceAck(deviceID uint, cursor uint) {
-	if cursor == 0 {
-		return
-	}
-	_ = a.db.Model(&model.Device{}).
-		Where("id = ? AND last_acked_cursor < ?", deviceID, cursor).
-		Update("last_acked_cursor", cursor).Error
-}
-
 func (a *App) toggleDeviceField(deviceID uint, field string) error {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	var device model.Device
-	if err := a.db.First(&device, deviceID).Error; err != nil {
+	if err := a.db.Where("account_id = ? AND deleted = ?", a.account.ID, false).First(&device, deviceID).Error; err != nil {
 		return err
 	}
 	var value bool
@@ -419,56 +417,61 @@ func (a *App) toggleDeviceField(deviceID uint, field string) error {
 		value = !device.SendRealtimeEnabled
 	case "receive_realtime_enabled":
 		value = !device.ReceiveRealtimeEnabled
-	case "disabled":
-		value = !device.Disabled
 	default:
 		return fmt.Errorf("unknown field %s", field)
 	}
-	return a.db.Model(&device).Update(field, value).Error
+	if err := a.db.Model(&device).Update(field, value).Error; err != nil {
+		return err
+	}
+	// Queued messages are checked again under stateMu immediately before delivery.
+	if field == "receive_realtime_enabled" && value {
+		a.hub.Push(deviceID, wsMessage{Type: "clipboard.sync_changed"})
+	}
+	if field == "send_realtime_enabled" {
+		for _, item := range a.textWindow {
+			if item.SourceDeviceID == deviceID {
+				a.notifySyncChangedLocked()
+				break
+			}
+		}
+	}
+	return nil
 }
 
 func (a *App) settingsSnapshot() map[string]any {
-	account := a.currentAccount()
 	return map[string]any{
-		"realtime_fanout_enabled": account.RealtimeFanoutEnabled,
-		"retention_days":          account.RetentionDays,
-		"file_max_bytes":          account.FileMaxBytes,
-		"text_batch_limit":        a.cfg.Sync.TextBatchLimit,
+		"file_max_bytes":   a.account.FileMaxBytes,
+		"text_batch_limit": a.cfg.Sync.TextBatchLimit,
 	}
-}
-
-func (a *App) shouldFanout(source *model.Device, item model.ClipboardItem) bool {
-	account := a.currentAccount()
-	return account.RealtimeFanoutEnabled && source.SendRealtimeEnabled && item.UploadKind == model.UploadKindRealtime
 }
 
 func (a *App) fanoutClipboardItem(source *model.Device, item model.ClipboardItem) {
-	if !a.shouldFanout(source, item) {
+	if source.Deleted || !source.SendRealtimeEnabled || item.UploadKind != model.UploadKindRealtime {
 		return
 	}
-
 	var targets []model.Device
-	if err := a.db.
-		Where("account_id = ? AND id <> ? AND disabled = ? AND receive_realtime_enabled = ?", source.AccountID, source.ID, false, true).
-		Find(&targets).Error; err != nil {
+	if err := a.db.Where("account_id = ? AND id <> ? AND deleted = ? AND receive_realtime_enabled = ?", source.AccountID, source.ID, false, true).Find(&targets).Error; err != nil {
 		return
-	}
-
-	payload := map[string]any{
-		"type": "clipboard.created",
-		"item": formatItemResponse(item),
 	}
 	for _, target := range targets {
-		a.hub.Push(target.ID, payload)
+		a.hub.Push(target.ID, wsMessage{Type: "clipboard.created", Item: &item})
+	}
+}
+
+func formatUploadReceipt(item model.ClipboardItem) map[string]any {
+	return map[string]any{
+		"item_id":      item.ID,
+		"content_kind": item.ContentKind,
+		"upload_kind":  item.UploadKind,
+		"mime_type":    item.MimeType,
+		"received_at":  item.ReceivedAt,
 	}
 }
 
 func formatItemResponse(item model.ClipboardItem) map[string]any {
 	response := map[string]any{
-		"id":                item.ID,
-		"server_cursor":     item.ID,
+		"item_id":           item.ID,
 		"source_device_id":  item.SourceDeviceID,
-		"client_item_id":    item.ClientItemID,
 		"content_kind":      item.ContentKind,
 		"upload_kind":       item.UploadKind,
 		"mime_type":         item.MimeType,
@@ -477,7 +480,7 @@ func formatItemResponse(item model.ClipboardItem) map[string]any {
 		"client_created_at": item.ClientCreatedAt,
 		"received_at":       item.ReceivedAt,
 	}
-	if item.TextContent != "" {
+	if item.ContentKind == model.ContentKindText {
 		response["text_content"] = item.TextContent
 	}
 	if item.BlobPath != "" {
@@ -486,42 +489,18 @@ func formatItemResponse(item model.ClipboardItem) map[string]any {
 	return response
 }
 
-func (a *App) createClipboardItem(source *model.Device, item model.ClipboardItem) (model.ClipboardItem, bool, error) {
-	var created bool
-	err := a.db.Transaction(func(tx *gorm.DB) error {
-		var existing model.ClipboardItem
-		err := tx.Where("source_device_id = ? AND client_item_id = ?", source.ID, item.ClientItemID).First(&existing).Error
-		if err == nil {
-			item = existing
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-
-		item.AccountID = source.AccountID
-		item.SourceDeviceID = source.ID
+// Caller holds stateMu; every accepted upload creates a new row.
+func (a *App) createClipboardItem(source *model.Device, item model.ClipboardItem) (model.ClipboardItem, error) {
+	item.AccountID = source.AccountID
+	item.SourceDeviceID = source.ID
+	if item.ReceivedAt.IsZero() {
 		item.ReceivedAt = time.Now().UTC()
-		item.ExpiresAt = a.retentionExpiry(item.ReceivedAt)
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&item).Error; err != nil {
-			return err
-		}
-		if item.ID == 0 {
-			if err := tx.Where("source_device_id = ? AND client_item_id = ?", source.ID, item.ClientItemID).First(&item).Error; err != nil {
-				return err
-			}
-			return nil
-		}
-		created = true
-		return nil
-	})
-	if err != nil {
-		return model.ClipboardItem{}, false, err
 	}
-	if created {
-		a.fanoutClipboardItem(source, item)
+	item.ExpiresAt = a.retentionExpiry(item.ReceivedAt)
+	if err := a.db.Create(&item).Error; err != nil {
+		return model.ClipboardItem{}, err
 	}
-	return item, created, nil
+	return item, nil
 }
 
 func (a *App) runCleanup(ctx context.Context) {
@@ -539,8 +518,18 @@ func (a *App) runCleanup(ctx context.Context) {
 }
 
 func (a *App) cleanupExpired(ctx context.Context) {
-	a.cleanupMu.Lock()
-	defer a.cleanupMu.Unlock()
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	defer func() {
+		changed, err := a.refreshTextWindowLocked()
+		if err != nil {
+			log.Printf("refresh text window after cleanup: %v", err)
+			return
+		}
+		if changed {
+			a.notifySyncChangedLocked()
+		}
+	}()
 
 	for {
 		var items []model.ClipboardItem
@@ -556,8 +545,10 @@ func (a *App) cleanupExpired(ctx context.Context) {
 		}
 
 		for _, item := range items {
+			if err := a.db.WithContext(ctx).Delete(&model.ClipboardItem{}, item.ID).Error; err != nil {
+				return
+			}
 			_ = a.blobStore.Delete(item.BlobPath)
-			_ = a.db.WithContext(ctx).Delete(&model.ClipboardItem{}, item.ID).Error
 		}
 	}
 }

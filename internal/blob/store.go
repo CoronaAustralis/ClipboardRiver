@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,23 +19,23 @@ func New(root string) *Store {
 	return &Store{root: root}
 }
 
-func (s *Store) Save(data []byte, originalName, fallbackExt string) (string, error) {
+func (s *Store) Save(data io.Reader, originalName, fallbackExt string) (string, int64, error) {
 	now := time.Now()
 	dir := filepath.Join(s.root, now.Format("2006"), now.Format("01"), now.Format("02"))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create blob dir: %w", err)
+		return "", 0, fmt.Errorf("create blob dir: %w", err)
 	}
 
 	fileName, err := buildBlobFileName(originalName, fallbackExt)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
-	path, err := writeUniqueFile(dir, fileName, data)
+	path, size, err := writeUniqueFile(dir, fileName, data)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return path, nil
+	return path, size, nil
 }
 
 func (s *Store) Delete(path string) error {
@@ -107,7 +108,7 @@ func normalizeExt(ext string) string {
 	return ext
 }
 
-func writeUniqueFile(dir, fileName string, data []byte) (string, error) {
+func writeUniqueFile(dir, fileName string, data io.Reader) (string, int64, error) {
 	ext := filepath.Ext(fileName)
 	base := strings.TrimSuffix(fileName, ext)
 	candidates := []string{fileName}
@@ -115,7 +116,7 @@ func writeUniqueFile(dir, fileName string, data []byte) (string, error) {
 	for i := 0; i < 8; i++ {
 		suffix, err := randomHex(4)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		candidates = append(candidates, base+"-"+suffix+ext)
 	}
@@ -127,19 +128,20 @@ func writeUniqueFile(dir, fileName string, data []byte) (string, error) {
 			if os.IsExist(err) {
 				continue
 			}
-			return "", fmt.Errorf("write blob: %w", err)
+			return "", 0, fmt.Errorf("write blob: %w", err)
 		}
-		if _, err := file.Write(data); err != nil {
+		size, err := io.Copy(file, data)
+		if err != nil {
 			_ = file.Close()
 			_ = os.Remove(path)
-			return "", fmt.Errorf("write blob: %w", err)
+			return "", 0, fmt.Errorf("write blob: %w", err)
 		}
 		if err := file.Close(); err != nil {
 			_ = os.Remove(path)
-			return "", fmt.Errorf("close blob: %w", err)
+			return "", 0, fmt.Errorf("close blob: %w", err)
 		}
-		return path, nil
+		return path, size, nil
 	}
 
-	return "", fmt.Errorf("write blob: could not allocate unique filename")
+	return "", 0, fmt.Errorf("write blob: could not allocate unique filename")
 }

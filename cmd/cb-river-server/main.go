@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -12,12 +15,25 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/config"
 )
 
+var version = "dev"
+
 func main() {
-	cfg, err := config.Load()
+	configPath := flag.String("config", "", "JSON config file path (defaults to ./config.json)")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Parse()
+	if flag.NArg() != 0 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	if *showVersion {
+		fmt.Printf("Clipboard River Server %s\n", version)
+		return
+	}
+
+	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-
 	application, err := app.New(cfg)
 	if err != nil {
 		log.Fatalf("init app: %v", err)

@@ -12,116 +12,151 @@
   A fast, low-friction clipboard sync system focused on making cross-device copy and paste feel almost invisible.
 </p>
 
-## What It Feels Like
-
-Clipboard River is built around one simple goal: clipboard sync should feel invisible.
-
-When both devices are on Windows, the ideal experience is:
-
-1. Copy on one device with `Ctrl + C`
-2. Switch to the other device
-3. Paste immediately with `Ctrl + V`
-
-No manual refresh, no extra send button, no "open this panel first" mental overhead.
-
-That seamless experience is the core value of the project.
-
 ## Why Clipboard River
 
-- Fast: realtime delivery with very little delay
-- Low-friction: designed to feel like the clipboard is simply shared
-- Practical: supports text and single-file clipboard sync
-- Controlled: self-hosted server with device management and history browsing
-- Cross-platform: Windows is the smoothest experience today, Android is already available, and iOS is planned for a future version
+Clipboard River aims to make cross-device copy and paste feel familiar: copy on one device, switch devices, and paste.
 
-## Platform Status
-
-### Windows
-
-Windows is the best experience today.
-
-With both Windows clients online, Clipboard River can feel almost native: copy on one side, paste on the other side right away.
-
-### Android
-
-Android is supported, but the experience is naturally a bit more involved because of Android platform restrictions around clipboard access and background behavior.
-
-It still works well, but it is not as effortless as the Windows-to-Windows flow.
-
-### iOS
-
-iOS is planned for a future version.
-
-If you want to build your own client before then, use [ApiRef.md](./ApiRef.md) as the protocol reference.
+- Fast: WebSocket delivers clipboard updates in realtime.
+- Low-friction: clients can receive updates and write to the clipboard automatically, reducing manual sends and refreshes.
+- Practical: text and single-file transfer, with image previews in the admin console.
+- Controlled: self-hosting, history browsing, device permissions, and enrollment management.
+- Cross-platform: Windows and Android clients are available; iOS is planned, and custom clients are welcome.
 
 ## Current Limitations
 
-- The best seamless experience today is still Windows to Windows while both devices are online.
-- On Windows, file-copy capture currently triggers only when exactly one file is copied.
-- Multi-file copy and folder copy are not supported yet.
-- Non-text clipboard sync currently uses a single-file upload path; files whose MIME starts with `image/` get inline preview in the admin UI.
-- Rich text, HTML fragments, and complex Office-style clipboard payloads are not supported yet.
-- Android works, but it is naturally less frictionless than the Windows-to-Windows flow because of platform restrictions.
+- The smoothest experience is between Windows clients while both devices are online.
+- Each file upload accepts one file; multi-file and folder synchronization are not supported.
+- Rich text, HTML fragments, and complex Office clipboard formats are not supported.
+- Android restricts clipboard access and background operation, so its experience differs from Windows.
+- WebSocket does not replay missed events. Clients can reconcile the latest 50 texts, which does not recover all offline history or missed file events.
 
 ## This Repository
 
 This repository contains the server:
 
-- device registration
-- realtime message fanout
-- clipboard history storage
-- file blob storage
+- device registration and enrollment
+- realtime clipboard delivery
+- clipboard history storage and a 50-item recent-text window
+- file storage and downloads
 - admin console
-- Docker-friendly deployment
+- Docker deployment and Windows/Linux binary releases
 
-Protocol and API details live in [ApiRef.md](./ApiRef.md). The README intentionally stays focused on product value and getting started.
+Clients and the server are separate projects. Clients may implement only the features they need, such as text uploads, realtime reception, or file transfer. See [ApiRef.md](./ApiRef.md) for the client protocol.
 
-## Repositories
-
-- Server: `cb_river_server` (this repository)
-- Windows client: [cb_river_client_windows](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
-- Android client: [cb_river_client_android](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
-- API reference: [ApiRef.md](./ApiRef.md)
-
-Client repository URLs above follow the current project naming used in this workspace. If you publish them under different names or organizations, update the links here.
+- Windows: [ClipboardRiverWindowsClient](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
+- Android: [ClipboardRiverAndroidClient](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
 
 ## Quick Start
 
-1. Start the server:
+Download a binary package from [GitHub Releases](https://github.com/CoronaAustralis/ClipboardRiver/releases/latest). Go is not required.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-river-server
+| Platform | Package |
+| --- | --- |
+| Linux amd64 | `clipboard-river-server_linux_amd64.tar.gz` |
+| Linux arm64 | `clipboard-river-server_linux_arm64.tar.gz` |
+| Windows amd64 | `clipboard-river-server_windows_amd64.zip` |
+
+Packages include the server, example config, and documentation. Archive checksums are in the release's `SHA256SUMS`.
+
+Linux (amd64 example):
+
+```bash
+curl -fLO https://github.com/CoronaAustralis/ClipboardRiver/releases/latest/download/clipboard-river-server_linux_amd64.tar.gz
+tar -xzf clipboard-river-server_linux_amd64.tar.gz
+cd clipboard-river-server_linux_amd64
+./clipboard-river-server --config ./config.json
 ```
 
-2. If `config.json` does not exist, the server creates it automatically. Set `CBR_CONFIG` if you want a different path.
-3. On first startup, the server creates the admin account if needed, stores the password hash in the database, and prints the generated 10-character password once in the log.
-4. Open [http://127.0.0.1:8080/admin/login](http://127.0.0.1:8080/admin/login).
-5. Generate an enrollment code in the admin UI and register your clients.
+Windows (PowerShell):
 
-`config.example.json` is only a sample file. The runtime default is `./config.json`.
+```powershell
+Invoke-WebRequest -Uri "https://github.com/CoronaAustralis/ClipboardRiver/releases/latest/download/clipboard-river-server_windows_amd64.zip" -OutFile "clipboard-river-server_windows_amd64.zip"
+Expand-Archive -Path .\clipboard-river-server_windows_amd64.zip -DestinationPath .
+Set-Location .\clipboard-river-server_windows_amd64
+.\clipboard-river-server.exe --config .\config.json
+```
+
+Find the initial admin password in the startup log and open [http://127.0.0.1:8080/admin/login](http://127.0.0.1:8080/admin/login). Enable enrollment in the console and register clients with the displayed code; the five-minute window allows unlimited registrations. Stop the server with `Ctrl+C`.
+
+| Parameter | Purpose |
+| --- | --- |
+| `--config <path>` | Select the JSON config file; defaults to `./config.json` and creates it if missing |
+| `--version` | Print version and exit |
+| `--help` | Show help and exit |
+
+## Server Configuration And Bootstrap
+
+Server configuration is read only from JSON; see [config.example.json](./config.example.json). Edit options such as the listen address in the file and restart to apply them. Relative paths resolve from the process's working directory.
+
+```json
+{
+  "server": { "listen_addr": ":8080" },
+  "storage": {
+    "driver": "sqlite",
+    "dsn": "./data/clipboard_river.db",
+    "data_dir": "./data",
+    "blob_dir": "./data/blobs"
+  },
+  "auth": { "session_secret": "replace-with-a-long-random-secret" },
+  "sync": {
+    "default_retention_days": 30,
+    "file_max_bytes": 5242880,
+    "text_batch_limit": 200
+  },
+  "admin": { "username": "admin" }
+}
+```
+
+Startup creates the default account and admin if needed. The generated 10-character admin password is logged once; only its hash is stored. A missing config is generated with a random `session_secret`. The example file is not loaded automatically.
+
+- `file_max_bytes`: positive values limit bytes per file; `0` allows any size; `-1` rejects file uploads.
+- `text_batch_limit`: maximum text items per batch; must be positive.
+- `default_retention_days`: default retention for a new account; `0` keeps history indefinitely. Existing accounts can change retention and file limits in the console.
+
+SQLite is the default; MySQL and PostgreSQL are also supported. Run one server process per database. Enrollment and the text window are held in memory: restart closes enrollment and rebuilds the text window from the database.
 
 ## Docker
 
-### Docker Compose
+Compose:
 
 ```bash
-wget -O docker-compose.yml https://raw.githubusercontent.com/CoronaAustralis/ClipboardRiver/refs/heads/main/compose.yaml && docker compose up -d
+wget -O docker-compose.yml https://raw.githubusercontent.com/CoronaAustralis/ClipboardRiver/refs/heads/main/compose.yaml
+docker compose up -d
 ```
 
-### Docker Run
+Run directly on Linux:
 
 ```bash
-docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server:latest
+docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" crestfallmax/clipboard-river-server:latest
 ```
 
-- remote image: `crestfallmax/clipboard-river-server:latest`
-- container config path: `/app/data/config.json`
-- config, SQLite database, and blob files all live under `/app/data`
-- the first generated admin password is printed to container logs
+For Windows PowerShell, use `-v "${PWD}\data:/app/data"`. The container loads `--config /app/data/config.json`; config, database, and files are persisted in the mounted `/app/data`. The initial admin password appears in container logs.
 
-## Docs And Utilities
+## Administration
 
-- API reference: [ApiRef.md](./ApiRef.md)
-- example config: [config.example.json](./config.example.json)
-- clear clipboard history and blob files: `./scripts/clear-history.ps1`
-- run tests: `./scripts/go-local.ps1 test ./...`
+The console provides history browsing, file downloads, device send/receive controls, soft deletion, temporary enrollment, retention, and file limits. Deleting a device revokes access while preserving its row and history links. Password changes require the current password and a new password of at least 8 characters.
+
+## Build
+
+Developers need Go 1.26 or later. Run these commands from the repository root.
+
+Linux:
+
+```bash
+mkdir -p bin
+./scripts/go-local.sh build -o ./bin/clipboard-river-server ./cmd/cb-river-server
+./scripts/go-local.sh test ./...
+```
+
+Windows (PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Force bin | Out-Null
+powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 build -o .\bin\clipboard-river-server.exe ./cmd/cb-river-server
+powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 test ./...
+```
+
+[go-local.sh](./scripts/go-local.sh) and [go-local.ps1](./scripts/go-local.ps1) use repository-local Go caches by default. Use `run` instead of `build` to run source directly, for example `./scripts/go-local.sh run ./cmd/cb-river-server --config ./config.json`.
+
+
+If the Bash build script loses executable permissions, run `chmod +x scripts/go-local.sh`.

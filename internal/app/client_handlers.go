@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,47 +22,26 @@ import (
 )
 
 type registerRequest struct {
-	DeviceUUID     string             `json:"device_uuid"`
-	EnrollmentCode string             `json:"enrollment_code"`
-	Nickname       string             `json:"nickname"`
-	OSName         string             `json:"os_name"`
-	OSVersion      string             `json:"os_version"`
-	Platform       string             `json:"platform"`
-	AppVersion     string             `json:"app_version"`
-	Capabilities   clientCapabilities `json:"capabilities"`
+	DeviceUUID     string  `json:"device_uuid"`
+	EnrollmentCode string  `json:"enrollment_code"`
+	Nickname       *string `json:"nickname"`
+	AppName        *string `json:"app_name"`
+	AppVersion     *string `json:"app_version"`
 }
 
 type profileRequest struct {
-	Nickname     string             `json:"nickname"`
-	OSName       string             `json:"os_name"`
-	OSVersion    string             `json:"os_version"`
-	Platform     string             `json:"platform"`
-	AppVersion   string             `json:"app_version"`
-	Capabilities clientCapabilities `json:"capabilities"`
+	AppName    *string `json:"app_name"`
+	AppVersion *string `json:"app_version"`
 }
 
 type textItemRequest struct {
-	ClientItemID    string `json:"client_item_id"`
-	UploadKind      string `json:"upload_kind"`
-	ClientCreatedAt string `json:"client_created_at"`
-	TextContent     string `json:"text_content"`
+	UploadKind      string  `json:"upload_kind"`
+	ClientCreatedAt string  `json:"client_created_at"`
+	TextContent     *string `json:"text_content"`
 }
 
 type textBatchRequest struct {
-	Items []textItemRequest `json:"items"`
-}
-
-func (a *App) handleClientHeartbeat(w http.ResponseWriter, r *http.Request) {
-	device := currentDevice(r)
-	if device == nil {
-		writeError(w, http.StatusUnauthorized, "device not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"server_at": time.Now().UTC(),
-		"settings":  a.settingsSnapshot(),
-	})
+	Items []json.RawMessage `json:"items"`
 }
 
 func (a *App) handleClientRegister(w http.ResponseWriter, r *http.Request) {
@@ -73,256 +54,296 @@ func (a *App) handleClientRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "device_uuid and enrollment_code are required")
 		return
 	}
-
-	var token model.EnrollmentToken
-	if err := a.db.Where("code_hash = ?", auth.HashToken(req.EnrollmentCode)).First(&token).Error; err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid enrollment code")
+	if !a.enrollment.authorize(req.EnrollmentCode) {
+		writeError(w, http.StatusBadRequest, "enrollment is closed or code is invalid")
 		return
 	}
-	now := time.Now().UTC()
-	if resolveEnrollmentTokenStatus(token, now) != enrollmentTokenStatusActive {
-		writeError(w, http.StatusUnauthorized, "enrollment code is not usable")
-		return
-	}
-
-	rawDeviceToken, err := auth.RandomToken(24)
+	rawToken, err := auth.RandomToken(24)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue device token")
 		return
 	}
-
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
 	var device model.Device
+	wasDeleted := false
+	now := time.Now().UTC()
 	err = a.db.Transaction(func(tx *gorm.DB) error {
 		err := tx.Where("account_id = ? AND device_uuid = ?", a.account.ID, req.DeviceUUID).First(&device).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			device = model.Device{
-				AccountID:              a.account.ID,
-				DeviceUUID:             req.DeviceUUID,
-				SendRealtimeEnabled:    true,
-				ReceiveRealtimeEnabled: true,
-			}
+			device = model.Device{AccountID: a.account.ID, DeviceUUID: req.DeviceUUID, SendRealtimeEnabled: true, ReceiveRealtimeEnabled: true}
 		}
-
-		device.Nickname = strings.TrimSpace(req.Nickname)
-		device.OSName = strings.TrimSpace(req.OSName)
-		device.OSVersion = strings.TrimSpace(req.OSVersion)
-		device.Platform = strings.TrimSpace(req.Platform)
-		device.AppVersion = strings.TrimSpace(req.AppVersion)
-		device.CapabilitiesJSON = encodeCapabilities(req.Capabilities)
-		device.DeviceTokenHash = auth.HashToken(rawDeviceToken)
-		device.Disabled = false
+		if req.Nickname != nil {
+			device.Nickname = *req.Nickname
+		}
+		if req.AppName != nil {
+			device.AppName = *req.AppName
+		}
+		if req.AppVersion != nil {
+			device.AppVersion = *req.AppVersion
+		}
+		wasDeleted = device.Deleted
+		device.DeviceTokenHash = auth.HashToken(rawToken)
+		device.Deleted = false
 		device.LastSeenAt = &now
-		if err := tx.Save(&device).Error; err != nil {
-			return err
-		}
-
-		token.UsedCount++
-		token.LastUsedAt = &now
-		return tx.Save(&token).Error
+		return tx.Save(&device).Error
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "register device failed")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"device_id":     device.ID,
-		"device_token":  rawDeviceToken,
-		"settings":      a.settingsSnapshot(),
-		"server_cursor": 0,
-	})
+	a.hub.CloseDevice(device.ID)
+	if wasDeleted && device.SendRealtimeEnabled {
+		for _, item := range a.textWindow {
+			if item.SourceDeviceID == device.ID {
+				a.notifySyncChangedLocked()
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"device_id": device.ID, "device_token": rawToken, "settings": a.settingsSnapshot()})
 }
 
 func (a *App) handleClientProfile(w http.ResponseWriter, r *http.Request) {
-	device := currentDevice(r)
-	if device == nil {
-		writeError(w, http.StatusUnauthorized, "device not found")
-		return
-	}
-
 	var req profileRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-
-	now := time.Now().UTC()
-	updates := map[string]any{
-		"nickname":          strings.TrimSpace(req.Nickname),
-		"os_name":           strings.TrimSpace(req.OSName),
-		"os_version":        strings.TrimSpace(req.OSVersion),
-		"platform":          strings.TrimSpace(req.Platform),
-		"app_version":       strings.TrimSpace(req.AppVersion),
-		"capabilities_json": encodeCapabilities(req.Capabilities),
-		"last_seen_at":      now,
+	updates := map[string]any{"last_seen_at": time.Now().UTC()}
+	if req.AppName != nil {
+		updates["app_name"] = *req.AppName
 	}
+	if req.AppVersion != nil {
+		updates["app_version"] = *req.AppVersion
+	}
+	device := currentDevice(r)
 	if err := a.db.Model(&model.Device{}).Where("id = ?", device.ID).Updates(updates).Error; err != nil {
 		writeError(w, http.StatusInternalServerError, "update profile failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": device.ID, "server_at": time.Now().UTC(), "settings": a.settingsSnapshot()})
 }
 
 func (a *App) handleClientTextItem(w http.ResponseWriter, r *http.Request) {
-	device := currentDevice(r)
-	if device == nil {
-		writeError(w, http.StatusUnauthorized, "device not found")
-		return
-	}
-
 	var req textItemRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-	item, created, err := a.createTextClipboardItem(device, req)
+	item, err := buildTextItem(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"created": created, "item": formatItemResponse(item)})
+	device := currentDevice(r)
+	item, err = a.createClipboardItem(device, item)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store text failed")
+		return
+	}
+	changed, err := a.refreshTextWindowLocked()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "text window unavailable")
+		return
+	}
+	a.fanoutClipboardItem(device, item)
+	if item.UploadKind == model.UploadKindHistory && changed {
+		a.notifySyncChangedLocked()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"created": true, "item": formatUploadReceipt(item)})
 }
 
 func (a *App) handleClientTextBatch(w http.ResponseWriter, r *http.Request) {
-	device := currentDevice(r)
-	if device == nil {
-		writeError(w, http.StatusUnauthorized, "device not found")
-		return
-	}
-
 	var req textBatchRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-	if len(req.Items) > a.cfg.Sync.TextBatchLimit {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("batch limit exceeded, max=%d", a.cfg.Sync.TextBatchLimit))
+	if len(req.Items) == 0 || len(req.Items) > a.cfg.Sync.TextBatchLimit {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("items must contain 1 to %d entries", a.cfg.Sync.TextBatchLimit))
 		return
 	}
-
+	device := currentDevice(r)
 	results := make([]map[string]any, 0, len(req.Items))
-	for _, entry := range req.Items {
-		item, created, err := a.createTextClipboardItem(device, entry)
-		result := map[string]any{
-			"client_item_id": entry.ClientItemID,
-			"created":        created,
+	hasHistory := false
+	for _, raw := range req.Items {
+		var req textItemRequest
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		err := decoder.Decode(&req)
+		var item model.ClipboardItem
+		if err == nil {
+			item, err = buildTextItem(req)
+		} else {
+			err = errors.New("invalid text item")
 		}
+		if err == nil {
+			item, err = a.createClipboardItem(device, item)
+			if err != nil {
+				err = errors.New("store text failed")
+			}
+		}
+		result := map[string]any{"created": err == nil}
 		if err != nil {
 			result["error"] = err.Error()
 		} else {
-			result["item"] = formatItemResponse(item)
+			result["item"] = formatUploadReceipt(item)
+			hasHistory = hasHistory || item.UploadKind == model.UploadKindHistory
+			a.fanoutClipboardItem(device, item)
 		}
 		results = append(results, result)
+	}
+	changed, err := a.refreshTextWindowLocked()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "text window unavailable")
+		return
+	}
+	if hasHistory && changed {
+		a.notifySyncChangedLocked()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
-func (a *App) createTextClipboardItem(device *model.Device, req textItemRequest) (model.ClipboardItem, bool, error) {
-	if strings.TrimSpace(req.ClientItemID) == "" {
-		return model.ClipboardItem{}, false, errors.New("client_item_id is required")
+func buildTextItem(req textItemRequest) (model.ClipboardItem, error) {
+	if req.TextContent == nil || *req.TextContent == "" {
+		return model.ClipboardItem{}, errors.New("text_content must be a nonempty string")
 	}
-	uploadKind := strings.TrimSpace(req.UploadKind)
-	if uploadKind == "" {
-		uploadKind = model.UploadKindRealtime
+	kind, err := normalizeUploadKind(req.UploadKind)
+	if err != nil {
+		return model.ClipboardItem{}, err
 	}
-	if uploadKind != model.UploadKindRealtime && uploadKind != model.UploadKindHistory {
-		return model.ClipboardItem{}, false, errors.New("invalid upload_kind")
+	now := time.Now().UTC()
+	createdAt, err := clientTimeOrNow(req.ClientCreatedAt, now)
+	if err != nil {
+		return model.ClipboardItem{}, err
 	}
-
-	item := model.ClipboardItem{
-		ClientItemID:    strings.TrimSpace(req.ClientItemID),
-		ContentKind:     model.ContentKindText,
-		UploadKind:      uploadKind,
-		TextContent:     req.TextContent,
-		CharCount:       utf8.RuneCountInString(req.TextContent),
-		ByteSize:        int64(len([]byte(req.TextContent))),
-		ClientCreatedAt: clientTimeOrNow(req.ClientCreatedAt),
-	}
-	return a.createClipboardItem(device, item)
+	return model.ClipboardItem{
+		ContentKind: model.ContentKindText, UploadKind: kind, TextContent: *req.TextContent,
+		ByteSize: int64(len(*req.TextContent)), CharCount: utf8.RuneCountInString(*req.TextContent),
+		ClientCreatedAt: createdAt, ReceivedAt: now,
+	}, nil
 }
 
 func (a *App) handleClientFileItem(w http.ResponseWriter, r *http.Request) {
-	device := currentDevice(r)
-	if device == nil {
-		writeError(w, http.StatusUnauthorized, "device not found")
+	// Do not hold the state lock while receiving or streaming a potentially unlimited file.
+	a.stateMu.Lock()
+	_, authErr := a.authenticateDevice(r)
+	limit := a.account.FileMaxBytes
+	a.stateMu.Unlock()
+	if authErr != nil {
+		writeError(w, http.StatusUnauthorized, "invalid device token")
 		return
 	}
-	if err := r.ParseMultipartForm(a.currentAccount().FileMaxBytes + (1 << 20)); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid multipart form")
+	if limit == -1 {
+		writeError(w, http.StatusBadRequest, "file uploads are disabled")
 		return
 	}
-
+	if limit > 0 && limit <= (1<<63-1)-(1<<20) {
+		r.Body = http.MaxBytesReader(w, r.Body, limit+(1<<20))
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid or oversized multipart form")
+		return
+	}
 	req, file, header, err := parseFileMultipart(r.MultipartForm)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	defer file.Close()
-
-	data, err := io.ReadAll(io.LimitReader(file, a.currentAccount().FileMaxBytes+1))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "read file failed")
-		return
-	}
-	if int64(len(data)) > a.currentAccount().FileMaxBytes {
+	if limit > 0 && header.Size > limit {
 		writeError(w, http.StatusBadRequest, "file exceeds max size")
 		return
 	}
-
-	detectedMime := http.DetectContentType(data)
-	blobPath, err := a.blobStore.Save(data, header.Filename, chooseBlobExtension(req.MimeType, detectedMime, header))
+	now := time.Now().UTC()
+	createdAt, err := clientTimeOrNow(req.ClientCreatedAt, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	prefix := make([]byte, 512)
+	n, err := io.ReadFull(file, prefix)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		writeError(w, http.StatusInternalServerError, "read file failed")
+		return
+	}
+	detectedMime := http.DetectContentType(prefix[:n])
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, "read file failed")
+		return
+	}
+	blobPath, size, err := a.blobStore.Save(file, header.Filename, chooseBlobExtension(req.MimeType, detectedMime, header))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store file failed")
 		return
 	}
-
-	uploadKind := req.UploadKind
-	if uploadKind == "" {
-		uploadKind = model.UploadKindRealtime
-	}
-	item := model.ClipboardItem{
-		ClientItemID:    req.ClientItemID,
-		ContentKind:     model.ContentKindFile,
-		UploadKind:      uploadKind,
-		MimeType:        firstNonEmpty(req.MimeType, detectedMime),
-		BlobPath:        blobPath,
-		ByteSize:        int64(len(data)),
-		ClientCreatedAt: clientTimeOrNow(req.ClientCreatedAt),
-	}
-	item, created, err := a.createClipboardItem(device, item)
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	device, err := a.authenticateDevice(r)
 	if err != nil {
 		_ = a.blobStore.Delete(blobPath)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusUnauthorized, "invalid device token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"created": created, "item": formatItemResponse(item)})
+	// Settings may have changed while the body was being read.
+	limit = a.account.FileMaxBytes
+	if limit == -1 || (limit > 0 && size > limit) {
+		_ = a.blobStore.Delete(blobPath)
+		writeError(w, http.StatusBadRequest, "file uploads disabled or file exceeds max size")
+		return
+	}
+	item, err := a.createClipboardItem(device, model.ClipboardItem{
+		ContentKind: model.ContentKindFile, UploadKind: req.UploadKind, MimeType: detectedMime,
+		BlobPath: blobPath, ByteSize: size, ClientCreatedAt: createdAt, ReceivedAt: now,
+	})
+	if err != nil {
+		_ = a.blobStore.Delete(blobPath)
+		writeError(w, http.StatusInternalServerError, "store file failed")
+		return
+	}
+	a.fanoutClipboardItem(device, item)
+	writeJSON(w, http.StatusOK, map[string]any{"created": true, "item": formatUploadReceipt(item)})
 }
 
 type fileMultipartRequest struct {
-	ClientItemID    string
 	UploadKind      string
 	ClientCreatedAt string
 	MimeType        string
 }
 
 func parseFileMultipart(form *multipart.Form) (fileMultipartRequest, multipart.File, *multipart.FileHeader, error) {
-	req := fileMultipartRequest{
-		ClientItemID:    strings.TrimSpace(firstFormValue(form.Value["client_item_id"])),
-		UploadKind:      strings.TrimSpace(firstFormValue(form.Value["upload_kind"])),
-		ClientCreatedAt: strings.TrimSpace(firstFormValue(form.Value["client_created_at"])),
-		MimeType:        strings.TrimSpace(firstFormValue(form.Value["mime_type"])),
+	req := fileMultipartRequest{}
+	for key, values := range form.Value {
+		if len(values) != 1 {
+			return req, nil, nil, errors.New("duplicate form field")
+		}
+		switch key {
+		case "upload_kind":
+			req.UploadKind = values[0]
+		case "client_created_at":
+			req.ClientCreatedAt = values[0]
+		case "mime_type":
+			req.MimeType = values[0]
+		default:
+			return req, nil, nil, errors.New("unknown form field")
+		}
 	}
-	if req.ClientItemID == "" {
-		return req, nil, nil, errors.New("client_item_id is required")
+	kind, err := normalizeUploadKind(req.UploadKind)
+	if err != nil {
+		return req, nil, nil, err
 	}
-	if req.UploadKind != "" && req.UploadKind != model.UploadKindRealtime && req.UploadKind != model.UploadKindHistory {
-		return req, nil, nil, errors.New("invalid upload_kind")
-	}
+	req.UploadKind = kind
 	files := form.File["file"]
-	if len(files) != 1 {
+	if len(form.File) != 1 || len(files) != 1 {
 		return req, nil, nil, errors.New("exactly one file is required")
 	}
 	file, err := files[0].Open()
@@ -332,18 +353,11 @@ func parseFileMultipart(form *multipart.Form) (fileMultipartRequest, multipart.F
 	return req, file, files[0], nil
 }
 
-func firstFormValue(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
-}
-
 func chooseBlobExtension(requested, detected string, header *multipart.FileHeader) string {
 	if ext := filepath.Ext(header.Filename); ext != "" {
 		return ext
 	}
-	if ext := extByMime(firstNonEmpty(requested, detected)); ext != "" {
+	if ext := extByMime(firstNonEmpty(detected, requested)); ext != "" {
 		return ext
 	}
 	return ".bin"
@@ -371,25 +385,33 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a *App) handleClientBlob(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	id, err := strconv.ParseUint(r.PathValue("item_id"), 10, 64)
 	if err != nil || id == 0 {
 		http.NotFound(w, r)
 		return
 	}
 
-	var item model.ClipboardItem
-	if err := a.db.First(&item, id).Error; err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	if !a.isAdminAuthenticated(r) {
+	a.stateMu.Lock()
+	var accountID uint
+	if a.isAdminAuthenticated(r) {
+		accountID = a.account.ID
+	} else {
 		device, err := a.authenticateDevice(r)
-		if err != nil || device.AccountID != item.AccountID {
+		if err != nil {
+			a.stateMu.Unlock()
 			writeError(w, http.StatusUnauthorized, "invalid device token")
 			return
 		}
+		accountID = device.AccountID
 	}
+	var item model.ClipboardItem
+	err = a.db.Where("account_id = ? AND content_kind = ? AND (expires_at IS NULL OR expires_at > ?)", accountID, model.ContentKindFile, time.Now().UTC()).First(&item, id).Error
+	a.stateMu.Unlock()
+	if err != nil || item.BlobPath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", item.MimeType)
 	setInlineContentDisposition(w, fileNameFromPath(item.BlobPath))
 	http.ServeFile(w, r, item.BlobPath)
 }
@@ -397,6 +419,7 @@ func (a *App) handleClientBlob(w http.ResponseWriter, r *http.Request) {
 func setInlineContentDisposition(w http.ResponseWriter, fileName string) {
 	fileName = strings.TrimSpace(fileName)
 	if fileName == "" {
+		w.Header().Set("Content-Disposition", "inline")
 		return
 	}
 	asciiName := strings.Map(func(r rune) rune {

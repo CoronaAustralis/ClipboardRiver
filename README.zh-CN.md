@@ -12,118 +12,137 @@
   一个强调快捷、低打扰、尽量无感的跨设备剪切板同步项目。
 </p>
 
-## 它真正想做到什么
-
-Clipboard River 的核心目标很简单：
-
-让剪切板同步这件事尽量“感觉不到它存在”。
-
-当两端都是 Windows，并且都在线时，理想体验就是：
-
-1. 这边 `Ctrl + C`
-2. 切到另一台设备
-3. 直接 `Ctrl + V`
-
-不需要手动刷新，不需要点发送，不需要先开某个同步面板。
-
-这就是这个项目最核心的价值。
-
 ## 为什么是它
 
-- 快：实时同步，延迟尽量低
-- 无感：目标就是像共享了一个剪切板一样自然
-- 实用：支持文本，也支持单文件同步
-- 可控：自建服务端，可查看历史、管理设备、控制接入
-- 跨平台：当前 Windows 体验最好，Android 已可用，iOS 会在后续版本推出
+Clipboard River 希望跨设备复制粘贴尽量接近日常操作：一端复制，切换设备后直接粘贴。
 
-## 平台现状
-
-### Windows
-
-目前体验最好的就是 Windows。
-
-当两端都是 Windows 客户端时，Clipboard River 可以非常接近“原生共享剪切板”的感觉，也就是一端复制，另一端直接粘贴。
-
-### Android
-
-Android 端已经支持，但由于 Android 对剪切板访问和后台行为本身限制更多，体验会比 Windows 稍微麻烦一点。
-
-它依然能用，而且是实用的，但不会像 Windows 双端那样几乎无感。
-
-### iOS
-
-iOS 会在后续版本推出。
-
-如果你想更早接入，也可以直接根据 [ApiRef.md](./ApiRef.md) 自行开发客户端。
+- 快：通过 WebSocket 实时推送，减少同步等待。
+- 低打扰：客户端可自动接收和写入剪切板，减少手动发送、刷新等操作。
+- 实用：支持文本和单文件同步，图片文件可在管理后台预览。
+- 可控：服务端可自行部署，提供历史浏览、设备权限和接入管理。
+- 跨平台：Windows 和 Android 客户端已可用，iOS 计划后续支持，也可以自行开发客户端。
 
 ## 当前限制
 
-- 当前最接近“无感同步”的体验，仍然是两端都在线的 Windows 到 Windows。
-- 在 Windows 端，本地文件复制捕获目前只会在“恰好复制了 1 个文件”时触发。
-- 暂不支持多文件复制和文件夹复制。
-- 当前非文本内容统一走单文件上传链路；`mime_type` 以 `image/` 开头的文件会在后台提供预览。
-- 暂不支持富文本、HTML 片段、复杂 Office 剪切板内容这类格式。
-- Android 已可用，但受平台限制影响，体验不会像 Windows 双端那样几乎无感。
+- 最接近无感同步的体验是两端 Windows 客户端同时在线。
+- 单次文件上传只支持一个文件，暂不支持多文件和文件夹同步。
+- 暂不支持富文本、HTML 片段和复杂 Office 剪切板格式。
+- Android 的剪切板访问和后台运行受系统限制，体验与 Windows 有差异。
+- WebSocket 不补发离线期间的事件；客户端可同步最近 50 条文本，无法据此恢复全部离线历史或错过的文件事件。
 
 ## 当前仓库是什么
 
 当前仓库只包含服务端，负责：
 
-- 设备注册
-- 实时消息分发
-- 剪切板历史存储
-- 文件 blob 存储
+- 设备注册与接入管理
+- 剪切板实时消息分发
+- 剪切板历史存储，以及最近 50 条文本的同步区
+- 文件存储和下载
 - 管理后台
-- Docker 部署支持
+- Docker 部署及 Windows、Linux 二进制发布
 
-协议和接口细节统一写在 [ApiRef.md](./ApiRef.md) 里。README 不再展开内部字段和实现细节，避免首页变成接口说明书。
+客户端与服务端独立开发，可以按需实现文本上传、实时接收、文件传输等功能，不必实现全部协议。客户端开发说明见 [ApiRef.md](./ApiRef.md)。
 
-## 仓库入口
-
-- 服务端：`cb_river_server`（当前仓库）
-- Windows 客户端：[cb_river_client_windows](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
-- Android 客户端：[cb_river_client_android](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
-- 接口文档：[ApiRef.md](./ApiRef.md)
-
-上面的客户端仓库链接是按当前工作区里的项目命名推导出来的。如果你后续发布时使用了不同的组织名或仓库名，把这里替换掉即可。
+- Windows：[ClipboardRiverWindowsClient](https://github.com/CoronaAustralis/ClipboardRiverWindowsClient)
+- Android：[ClipboardRiverAndroidClient](https://github.com/CoronaAustralis/ClipboardRiverAndroidClient)
 
 ## 快速开始
 
-1. 启动服务端：
+从 [GitHub Releases](https://github.com/CoronaAustralis/ClipboardRiver/releases/latest) 下载对应平台的二进制包。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 run ./cmd/cb-river-server
+Linux（以下以 amd64 为例）：
+
+```bash
+curl -fLO https://github.com/CoronaAustralis/ClipboardRiver/releases/latest/download/clipboard-river-server_linux_amd64.tar.gz
+tar -xzf clipboard-river-server_linux_amd64.tar.gz
+cd clipboard-river-server_linux_amd64
+./clipboard-river-server --config ./config.json
 ```
 
-2. 如果 `config.json` 不存在，服务端会自动生成一份初始配置。若想改路径，设置 `CBR_CONFIG` 即可。
-3. 第一次启动时，如果数据库里还没有管理员账号，服务端会自动生成一个 10 位随机密码，把哈希写进数据库，并只在日志里打印一次明文。
-4. 打开 [http://127.0.0.1:8080/admin/login](http://127.0.0.1:8080/admin/login)。
-5. 进入后台生成接入码，然后让客户端注册。
+Windows（PowerShell）：
 
-`config.example.json` 只是示例配置，运行时默认读取的是 `./config.json`。
+```powershell
+Invoke-WebRequest -Uri "https://github.com/CoronaAustralis/ClipboardRiver/releases/latest/download/clipboard-river-server_windows_amd64.zip" -OutFile "clipboard-river-server_windows_amd64.zip"
+Expand-Archive -Path .\clipboard-river-server_windows_amd64.zip -DestinationPath .
+Set-Location .\clipboard-river-server_windows_amd64
+.\clipboard-river-server.exe --config .\config.json
+```
+
+首次启动后，从日志获取管理员密码，打开 [http://127.0.0.1:8080/admin/login](http://127.0.0.1:8080/admin/login)。登录后台开启接入窗口，使用接入码注册客户端；窗口持续 5 分钟，期间不限注册次数。
+
+| 参数 | 作用 |
+| --- | --- |
+| `--config <path>` | 指定 JSON 配置文件，默认 `./config.json`；不存在时自动生成 |
+| `--version` | 显示版本并退出 |
+| `--help` | 显示帮助并退出 |
+
+## 服务端配置与初始化
+
+服务端配置只从 JSON 文件读取，示例见 [config.example.json](./config.example.json)。监听地址等选项在文件中修改后重启生效。相对路径以运行程序时的工作目录为基准。
+
+```json
+{
+  "server": { "listen_addr": ":8080" },
+  "storage": {
+    "driver": "sqlite",
+    "dsn": "./data/clipboard_river.db",
+    "data_dir": "./data",
+    "blob_dir": "./data/blobs"
+  },
+  "auth": { "session_secret": "replace-with-a-long-random-secret" },
+  "sync": {
+    "default_retention_days": 30,
+    "file_max_bytes": 5242880,
+    "text_batch_limit": 200
+  },
+  "admin": { "username": "admin" }
+}
+```
+
+首次启动按需创建默认账户和管理员，自动生成的 10 位管理员密码只输出一次，数据库仅保存密码哈希。缺失的配置文件会自动生成随机 `session_secret`，示例文件不会自动加载。
+
+默认使用 SQLite，也支持 MySQL、PostgreSQL。每个数据库运行一个服务端进程；接入窗口和文本同步区保存在进程内存中，重启后接入关闭、文本同步区从数据库重建。
 
 ## Docker
 
-### Docker Compose
+Compose：
 
 ```bash
-wget -O docker-compose.yml https://raw.githubusercontent.com/CoronaAustralis/ClipboardRiver/refs/heads/main/compose.yaml && docker compose up -d
+wget -O docker-compose.yml https://raw.githubusercontent.com/CoronaAustralis/ClipboardRiver/refs/heads/main/compose.yaml
+docker compose up -d
 ```
 
-### Docker Run
+直接运行（Linux）：
 
 ```bash
-docker run --name clipboard-river-server -p 8080:8080 -v ${PWD}\data:/app/data crestfallmax/clipboard-river-server:latest
+docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" crestfallmax/clipboard-river-server:latest
 ```
 
-- 远程镜像：`crestfallmax/clipboard-river-server:latest`
-- 容器内配置路径：`/app/data/config.json`
-- 配置、SQLite 数据库和 blob 文件都放在 `/app/data`
-- 首次生成的管理员密码会打印到容器日志中
+## 管理后台
 
-## 文档与工具
+后台提供历史浏览、文件下载、设备发送/接收开关、软删除设备、临时接入窗口、保留期限及文件限制设置。删除设备会撤销访问权限，同时保留设备记录和历史来源关联。修改管理员密码需要当前密码，新密码至少 8 位。
 
-- 接口文档：[ApiRef.md](./ApiRef.md)
-- 示例配置：[config.example.json](./config.example.json)
-- 清空剪切板历史和 blob 文件：`./scripts/clear-history.ps1`
-- 运行测试：`./scripts/go-local.ps1 test ./...`
+## Build（源码构建）
+
+开发者安装 Go 1.26 或更新版本，在仓库根目录执行。
+
+Linux：
+
+```bash
+mkdir -p bin
+./scripts/go-local.sh build -o ./bin/clipboard-river-server ./cmd/cb-river-server
+./scripts/go-local.sh test ./...
+```
+
+Windows（PowerShell）：
+
+```powershell
+New-Item -ItemType Directory -Force bin | Out-Null
+powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 build -o .\bin\clipboard-river-server.exe ./cmd/cb-river-server
+powershell -ExecutionPolicy Bypass -File .\scripts\go-local.ps1 test ./...
+```
+
+[go-local.sh](./scripts/go-local.sh) 和 [go-local.ps1](./scripts/go-local.ps1) 默认使用仓库内的 Go 缓存，`build` 替换为 `run` 可直接运行源码，例如 `./scripts/go-local.sh run ./cmd/cb-river-server --config ./config.json`。
+
+
+Bash 构建脚本丢失执行权限时运行 `chmod +x scripts/go-local.sh`。

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -71,8 +70,12 @@ func defaultConfig() Config {
 }
 
 func Load() (Config, error) {
+	return LoadFile("")
+}
+
+// LoadFile reads the selected JSON file, defaulting to ./config.json.
+func LoadFile(configPath string) (Config, error) {
 	cfg := defaultConfig()
-	configPath := strings.TrimSpace(os.Getenv("CBR_CONFIG"))
 	if configPath == "" {
 		configPath = "config.json"
 	}
@@ -83,17 +86,6 @@ func Load() (Config, error) {
 	if err := loadJSON(configPath, &cfg); err != nil {
 		return Config{}, err
 	}
-
-	overrideString(&cfg.Server.ListenAddr, "CBR_LISTEN_ADDR")
-	overrideString(&cfg.Storage.Driver, "CBR_DB_DRIVER")
-	overrideString(&cfg.Storage.DSN, "CBR_DB_DSN")
-	overrideString(&cfg.Storage.DataDir, "CBR_DATA_DIR")
-	overrideString(&cfg.Storage.BlobDir, "CBR_BLOB_DIR")
-	overrideString(&cfg.Auth.SessionSecret, "CBR_SESSION_SECRET")
-	overrideString(&cfg.Admin.Username, "CBR_ADMIN_USERNAME")
-	overrideInt(&cfg.Sync.DefaultRetentionDays, "CBR_RETENTION_DAYS")
-	overrideInt64(&cfg.Sync.FileMaxBytes, "CBR_FILE_MAX_BYTES")
-	overrideInt(&cfg.Sync.TextBatchLimit, "CBR_TEXT_BATCH_LIMIT")
 
 	if cfg.Storage.DataDir == "" {
 		cfg.Storage.DataDir = "./data"
@@ -122,10 +114,10 @@ func Load() (Config, error) {
 		cfg.Admin.Username = "admin"
 	}
 	if cfg.Sync.TextBatchLimit <= 0 {
-		cfg.Sync.TextBatchLimit = 200
+		return Config{}, errors.New("text_batch_limit must be positive")
 	}
-	if cfg.Sync.FileMaxBytes <= 0 {
-		cfg.Sync.FileMaxBytes = 5 * 1024 * 1024
+	if cfg.Sync.FileMaxBytes < -1 {
+		return Config{}, errors.New("file_max_bytes must be -1, 0, or positive")
 	}
 	if err := os.MkdirAll(cfg.Storage.DataDir, 0o755); err != nil {
 		return Config{}, fmt.Errorf("create data dir: %w", err)
@@ -178,28 +170,6 @@ func loadJSON(path string, cfg *Config) error {
 		return fmt.Errorf("decode config %s: %w", path, err)
 	}
 	return nil
-}
-
-func overrideString(target *string, key string) {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		*target = value
-	}
-}
-
-func overrideInt(target *int, key string) {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		if parsed, err := strconv.Atoi(value); err == nil {
-			*target = parsed
-		}
-	}
-}
-
-func overrideInt64(target *int64, key string) {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-			*target = parsed
-		}
-	}
 }
 
 func randomString(size int) (string, error) {
