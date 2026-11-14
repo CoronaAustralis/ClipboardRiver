@@ -89,6 +89,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
           cat > release-notes.md <<'EOF'
           ## Run / 启动
 
@@ -121,5 +122,10 @@ jobs:
           See the included README files for configuration and build instructions. `SHA256SUMS` contains the archive checksums.
           完整配置和构建说明见包内 README；压缩包校验值见 `SHA256SUMS`。
           EOF
-          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
-            --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md --generate-notes
+          assets=(dist/*.tar.gz dist/*.zip dist/SHA256SUMS)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md --generate-notes
+          fi
