@@ -127,8 +127,10 @@ docker compose up -d
 Run directly on Linux:
 
 ```bash
-docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" crestfallmax/clipboard-river-server:latest
+docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" ghcr.io/coronaaustralis/clipboardriver:latest
 ```
+
+The image supports Linux amd64 and arm64. Use `latest` for the most recently published version, or pin a release tag such as `ghcr.io/coronaaustralis/clipboardriver:v1.0.0`.
 
 For Windows PowerShell, use `-v "${PWD}\data:/app/data"`. The container loads `--config /app/data/config.json`; config, database, and files are persisted in the mounted `/app/data`. The initial admin password appears in container logs.
 
