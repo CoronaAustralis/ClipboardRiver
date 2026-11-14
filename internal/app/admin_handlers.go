@@ -6,9 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/clipboardriver/cb_river_server/internal/auth"
 	"github.com/clipboardriver/cb_river_server/internal/model"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -158,6 +156,9 @@ func (a *App) handleAdminHistory(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(name) == "" {
 			name = device.DeviceUUID
 		}
+		if device.Deleted {
+			name += " (" + base.T("history.deleted_device") + ")"
+		}
 		deviceNames[device.ID] = name
 	}
 	deletedDeviceName := base.T("history.deleted_device")
@@ -280,7 +281,7 @@ func buildHistoryPageURL(page int, deviceID, kind, query string) string {
 
 func (a *App) handleAdminDevices(w http.ResponseWriter, r *http.Request) {
 	var devices []model.Device
-	if err := a.db.Where("account_id = ?", a.account.ID).Order("updated_at DESC").Find(&devices).Error; err != nil {
+	if err := a.db.Where("account_id = ? AND deleted = ?", a.account.ID, false).Order("updated_at DESC").Find(&devices).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -309,10 +310,6 @@ func (a *App) handleAdminToggleDeviceReceive(w http.ResponseWriter, r *http.Requ
 	a.handleToggleDeviceField(w, r, "receive_realtime_enabled")
 }
 
-func (a *App) handleAdminToggleDeviceDisabled(w http.ResponseWriter, r *http.Request) {
-	a.handleToggleDeviceField(w, r, "disabled")
-}
-
 func (a *App) handleToggleDeviceField(w http.ResponseWriter, r *http.Request, field string) {
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
 	if err == nil {
@@ -329,127 +326,49 @@ func (a *App) handleToggleDeviceField(w http.ResponseWriter, r *http.Request, fi
 
 func (a *App) handleAdminDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
-	if err == nil {
-		err = a.db.Where("account_id = ? AND id = ?", a.account.ID, id).Delete(&model.Device{}).Error
-		if err == nil {
+	if err == nil && id > 0 {
+		a.stateMu.Lock()
+		result := a.db.Model(&model.Device{}).
+			Where("account_id = ? AND id = ? AND deleted = ?", a.account.ID, id, false).
+			Updates(map[string]any{"deleted": true, "device_token_hash": ""})
+		err = result.Error
+		if err == nil && result.RowsAffected > 0 {
 			a.hub.CloseDevice(uint(id))
+			a.notifySyncChangedLocked()
 		}
+		a.stateMu.Unlock()
 	}
 	message := "device_deleted"
-	if err != nil {
-		message = "revoke_failed"
+	if err != nil || id == 0 {
+		message = "update_failed"
 	}
 	redirectWithMessage(w, r, "/admin/devices", message, nil)
 }
 
 func (a *App) handleAdminTokens(w http.ResponseWriter, r *http.Request) {
-	var tokens []model.EnrollmentToken
-	if err := a.db.Where("account_id = ?", a.account.ID).Order("created_at DESC").Find(&tokens).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	now := time.Now().UTC()
-	type tokenRow struct {
-		Token       model.EnrollmentToken
-		StatusKey   string
-		StatusClass string
-		CanRevoke   bool
-	}
-	rows := make([]tokenRow, 0, len(tokens))
-	for _, token := range tokens {
-		status := resolveEnrollmentTokenStatus(token, now)
-		row := tokenRow{
-			Token:       token,
-			StatusKey:   "tokens.active",
-			StatusClass: "ok",
-			CanRevoke:   status == enrollmentTokenStatusActive,
-		}
-		switch status {
-		case enrollmentTokenStatusRevoked:
-			row.StatusKey = "tokens.revoked"
-			row.StatusClass = "warn"
-		case enrollmentTokenStatusExpired:
-			row.StatusKey = "tokens.expired"
-			row.StatusClass = "warn"
-		case enrollmentTokenStatusExhausted:
-			row.StatusKey = "tokens.exhausted"
-			row.StatusClass = "warn"
-		}
-		rows = append(rows, row)
-	}
-
 	a.render(w, "tokens", map[string]any{
-		"Base":        a.pageBase(w, r, "page.tokens", "tokens"),
-		"Tokens":      rows,
-		"CreatedCode": r.URL.Query().Get("created"),
+		"Base":       a.pageBase(w, r, "page.tokens", "tokens"),
+		"Enrollment": a.enrollment.snapshot(),
 	})
 }
 
-func (a *App) handleAdminCreateToken(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		redirectWithMessage(w, r, "/admin/tokens", "invalid_form", nil)
-		return
-	}
-	code, err := auth.RandomToken(12)
-	if err != nil {
+func (a *App) handleAdminOpenEnrollment(w http.ResponseWriter, r *http.Request) {
+	if err := a.enrollment.open(); err != nil {
 		redirectWithMessage(w, r, "/admin/tokens", "update_failed", nil)
 		return
 	}
-	maxUses := parsePositiveInt(r.FormValue("max_uses"), 1)
-	expiresHours := parsePositiveInt(r.FormValue("expires_hours"), 24*7)
-	var expiresAt *time.Time
-	if r.FormValue("no_expiry") == "" {
-		value := time.Now().UTC().Add(time.Duration(expiresHours) * time.Hour)
-		expiresAt = &value
-	}
-
-	token := model.EnrollmentToken{
-		AccountID:  a.account.ID,
-		CodeHash:   auth.HashToken(code),
-		CodePrefix: code[:12],
-		MaxUses:    maxUses,
-		ExpiresAt:  expiresAt,
-	}
-	if err := a.db.Create(&token).Error; err != nil {
-		redirectWithMessage(w, r, "/admin/tokens", "update_failed", nil)
-		return
-	}
-	redirectWithMessage(w, r, "/admin/tokens", "token_created", map[string]string{"created": code})
+	redirectWithMessage(w, r, "/admin/tokens", "enrollment_opened", nil)
 }
 
-func (a *App) handleAdminRevokeToken(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
-	if err != nil {
-		redirectWithMessage(w, r, "/admin/tokens", "revoke_failed", nil)
-		return
-	}
-
-	var token model.EnrollmentToken
-	if err := a.db.Where("account_id = ? AND id = ?", a.account.ID, id).First(&token).Error; err != nil {
-		redirectWithMessage(w, r, "/admin/tokens", "revoke_failed", nil)
-		return
-	}
-
-	now := time.Now().UTC()
-	if resolveEnrollmentTokenStatus(token, now) != enrollmentTokenStatusActive {
-		redirectWithMessage(w, r, "/admin/tokens", "token_not_active", nil)
-		return
-	}
-	if err := a.db.Model(&model.EnrollmentToken{}).Where("id = ?", id).Update("revoked_at", &now).Error; err != nil {
-		redirectWithMessage(w, r, "/admin/tokens", "revoke_failed", nil)
-		return
-	}
-	redirectWithMessage(w, r, "/admin/tokens", "token_revoked", nil)
+func (a *App) handleAdminCloseEnrollment(w http.ResponseWriter, r *http.Request) {
+	a.enrollment.close()
+	redirectWithMessage(w, r, "/admin/tokens", "enrollment_closed", nil)
 }
 
 func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
-	var account model.Account
-	if err := a.db.First(&account, a.account.ID).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.account = account
+	a.stateMu.Lock()
+	account := a.currentAccount()
+	a.stateMu.Unlock()
 	a.render(w, "settings", map[string]any{
 		"Base":     a.pageBase(w, r, "page.settings", "settings"),
 		"Account":  account,
@@ -463,28 +382,21 @@ func (a *App) handleAdminUpdateSettings(w http.ResponseWriter, r *http.Request) 
 		redirectWithMessage(w, r, "/admin/settings", "invalid_form", nil)
 		return
 	}
-	retentionDays := 0
-	if value := strings.TrimSpace(r.FormValue("retention_days")); value != "" {
-		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
-			retentionDays = parsed
-		}
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	retentionDays, err := strconv.Atoi(strings.TrimSpace(r.FormValue("retention_days")))
+	fileMaxBytes, fileErr := strconv.ParseInt(strings.TrimSpace(r.FormValue("file_max_bytes")), 10, 64)
+	if err != nil || retentionDays < 0 || fileErr != nil || fileMaxBytes < -1 {
+		redirectWithMessage(w, r, "/admin/settings", "invalid_form", nil)
+		return
 	}
-	fileMaxBytes := a.account.FileMaxBytes
-	if value := strings.TrimSpace(r.FormValue("file_max_bytes")); value != "" {
-		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
-			fileMaxBytes = parsed
-		}
-	}
-	updates := map[string]any{
-		"realtime_fanout_enabled": r.FormValue("realtime_fanout_enabled") == "on",
-		"retention_days":          retentionDays,
-		"file_max_bytes":          fileMaxBytes,
-	}
+	updates := map[string]any{"retention_days": retentionDays, "file_max_bytes": fileMaxBytes}
 	if err := a.db.Model(&model.Account{}).Where("id = ?", a.account.ID).Updates(updates).Error; err != nil {
 		redirectWithMessage(w, r, "/admin/settings", "save_failed", nil)
 		return
 	}
-	_ = a.db.First(&a.account, a.account.ID).Error
+	a.account.RetentionDays = retentionDays
+	a.account.FileMaxBytes = fileMaxBytes
 	redirectWithMessage(w, r, "/admin/settings", "settings_saved", nil)
 }
 

@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"mime/multipart"
 	"net"
@@ -21,50 +20,37 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/model"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
 )
 
-func TestRegisterSameDeviceUpdatesMetadata(t *testing.T) {
+func TestRegisterSameDeviceUpdatesMetadataAndRevokesOldSessions(t *testing.T) {
 	app := newTestApp(t)
-	defer func() { _ = app.Close() }()
-
-	code := createEnrollmentToken(t, app, 10)
-
-	first := performJSON(t, app.Router(), "POST", "/api/v1/client/register", map[string]any{
-		"device_uuid":     "device-1",
-		"enrollment_code": code,
-		"nickname":        "Desk",
-		"os_name":         "Windows",
-		"os_version":      "11",
-		"platform":        "desktop",
-		"app_version":     "1.0.0",
+	defer app.Close()
+	handler := app.Router()
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	code := openEnrollment(t, app)
+	oldToken := registerDevice(t, handler, app, code, "device-1", "Desk")
+	conn := connectClientWS(t, server.URL, oldToken, "device-1")
+	defer conn.Close()
+	response := performJSON(t, handler, "POST", "/api/v1/client/register", map[string]any{
+		"device_uuid": "device-1", "enrollment_code": code, "app_name": "Custom Client", "app_version": "2.0.0",
 	}, "")
-	if first.Code != http.StatusOK {
-		t.Fatalf("register status = %d, want %d, body=%s", first.Code, http.StatusOK, first.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("register: %d %s", response.Code, response.Body)
 	}
-
-	second := performJSON(t, app.Router(), "POST", "/api/v1/client/register", map[string]any{
-		"device_uuid":     "device-1",
-		"enrollment_code": code,
-		"nickname":        "Desk Updated",
-		"os_name":         "Windows",
-		"os_version":      "11 24H2",
-		"platform":        "desktop",
-		"app_version":     "1.1.0",
-	}, "")
-	if second.Code != http.StatusOK {
-		t.Fatalf("second register status = %d, want %d, body=%s", second.Code, http.StatusOK, second.Body.String())
-	}
-
 	var devices []model.Device
 	if err := app.db.Find(&devices).Error; err != nil {
-		t.Fatalf("list devices: %v", err)
+		t.Fatal(err)
 	}
-	if got := len(devices); got != 1 {
-		t.Fatalf("device count = %d, want 1", got)
+	if len(devices) != 1 || devices[0].Nickname != "Desk" || devices[0].AppName != "Custom Client" || devices[0].AppVersion != "2.0.0" {
+		t.Fatalf("unexpected metadata: %+v", devices)
 	}
-	if devices[0].Nickname != "Desk Updated" || devices[0].OSVersion != "11 24H2" || devices[0].AppVersion != "1.1.0" {
-		t.Fatalf("device metadata not updated: %+v", devices[0])
+	if response := performJSON(t, handler, "POST", "/api/v1/client/device/profile", nil, oldToken); response.Code != http.StatusUnauthorized {
+		t.Fatalf("old token still works: %d", response.Code)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("old authenticated WebSocket must close")
 	}
 }
 
@@ -200,81 +186,58 @@ func TestNewAppGeneratesInitialAdminPassword(t *testing.T) {
 	}
 }
 
-func TestProfileUpdateAndIdempotentTextUpload(t *testing.T) {
+func TestProfileAndNonIdempotentTextUpload(t *testing.T) {
 	app := newTestApp(t)
-	defer func() { _ = app.Close() }()
+	defer app.Close()
 	handler := app.Router()
-
-	code := createEnrollmentToken(t, app, 10)
-	deviceToken := registerDevice(t, handler, app, code, "source-1", "Phone")
-	secondToken := registerDevice(t, handler, app, code, "target-1", "Laptop")
-
-	profileResp := performJSON(t, handler, "POST", "/api/v1/client/device/profile", map[string]any{
-		"nickname":     "Phone Updated",
-		"os_name":      "Android",
-		"os_version":   "15",
-		"platform":     "mobile",
-		"app_version":  "2.0.0",
-		"capabilities": map[string]any{"supports_text": true, "supports_file": true, "supports_ws": true},
-	}, deviceToken)
-	if profileResp.Code != http.StatusOK {
-		t.Fatalf("profile update status = %d, body=%s", profileResp.Code, profileResp.Body.String())
+	token := registerDevice(t, handler, app, openEnrollment(t, app), "source-1", "Phone")
+	response := performJSON(t, handler, "POST", "/api/v1/client/device/profile", map[string]any{"app_name": "Updated App", "app_version": "2.0.0"}, token)
+	if response.Code != http.StatusOK {
+		t.Fatalf("profile: %d %s", response.Code, response.Body)
 	}
-
-	var source model.Device
-	if err := app.db.Where("device_uuid = ?", "source-1").First(&source).Error; err != nil {
-		t.Fatalf("find source device: %v", err)
+	for _, body := range []any{nil, map[string]any{}} {
+		response = performJSON(t, handler, "POST", "/api/v1/client/device/profile", body, token)
+		var profile struct {
+			DeviceID uint           `json:"device_id"`
+			Settings map[string]any `json:"settings"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &profile) != nil || profile.DeviceID == 0 || len(profile.Settings) != 2 {
+			t.Fatalf("profile lookup: %d %s", response.Code, response.Body)
+		}
 	}
-	if source.Nickname != "Phone Updated" || source.OSVersion != "15" {
-		t.Fatalf("profile not updated: %+v", source)
+	response = performJSON(t, handler, "POST", "/api/v1/client/device/profile", map[string]any{"nickname": "cannot change"}, token)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("profile accepted nickname: %d", response.Code)
 	}
-	if !strings.Contains(source.CapabilitiesJSON, `"supports_file":true`) {
-		t.Fatalf("capabilities missing supports_file: %s", source.CapabilitiesJSON)
+	var device model.Device
+	if err := app.db.Where("device_uuid = ?", "source-1").First(&device).Error; err != nil {
+		t.Fatal(err)
 	}
-
-	heartbeatResp := performJSON(t, handler, "POST", "/api/v1/client/heartbeat", map[string]any{}, deviceToken)
-	if heartbeatResp.Code != http.StatusOK {
-		t.Fatalf("heartbeat status = %d, body=%s", heartbeatResp.Code, heartbeatResp.Body.String())
+	if device.Nickname != "Phone" || device.AppName != "Updated App" || device.AppVersion != "2.0.0" {
+		t.Fatalf("profile metadata: %+v", device)
 	}
-	var heartbeatPayload struct {
-		Settings map[string]any `json:"settings"`
+	body := map[string]any{"text_content": "hello world", "client_created_at": time.Now().UTC().Format(time.RFC3339)}
+	for i := 0; i < 2; i++ {
+		response = performJSON(t, handler, "POST", "/api/v1/client/items/text", body, token)
+		var receipt struct {
+			Created bool           `json:"created"`
+			Item    map[string]any `json:"item"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &receipt) != nil || !receipt.Created || len(receipt.Item) != 5 || receipt.Item["item_id"] == nil {
+			t.Fatalf("receipt: %d %s", response.Code, response.Body)
+		}
 	}
-	if err := json.Unmarshal(heartbeatResp.Body.Bytes(), &heartbeatPayload); err != nil {
-		t.Fatalf("decode heartbeat response: %v", err)
+	var count int64
+	if err := app.db.Model(&model.ClipboardItem{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := heartbeatPayload.Settings["file_max_bytes"]; !ok {
-		t.Fatalf("expected file_max_bytes in heartbeat settings: %#v", heartbeatPayload.Settings)
+	if count != 2 {
+		t.Fatalf("expected a new row for each upload, got %d", count)
 	}
-	if got := len(heartbeatPayload.Settings); got != 4 {
-		t.Fatalf("unexpected heartbeat settings field count = %d, settings=%#v", got, heartbeatPayload.Settings)
-	}
-
-	body := map[string]any{
-		"client_item_id":    "item-1",
-		"upload_kind":       "realtime",
-		"client_created_at": time.Now().UTC().Format(time.RFC3339),
-		"text_content":      "hello world",
-	}
-	firstUpload := performJSON(t, handler, "POST", "/api/v1/client/items/text", body, deviceToken)
-	if firstUpload.Code != http.StatusOK {
-		t.Fatalf("first upload status = %d, body=%s", firstUpload.Code, firstUpload.Body.String())
-	}
-	secondUpload := performJSON(t, handler, "POST", "/api/v1/client/items/text", body, deviceToken)
-	if secondUpload.Code != http.StatusOK {
-		t.Fatalf("second upload status = %d, body=%s", secondUpload.Code, secondUpload.Body.String())
-	}
-
-	var items []model.ClipboardItem
-	if err := app.db.Find(&items).Error; err != nil {
-		t.Fatalf("list items: %v", err)
-	}
-	if got := len(items); got != 1 {
-		t.Fatalf("clipboard item count = %d, want 1", got)
-	}
-
-	pullResp := performJSON(t, handler, "GET", "/api/v1/client/sync/pull?after_cursor=0&limit=10", nil, secondToken)
-	if pullResp.Code != http.StatusNotFound {
-		t.Fatalf("sync pull should be unavailable, status = %d, body=%s", pullResp.Code, pullResp.Body.String())
+	body["client_created_at"] = "invalid"
+	response = performJSON(t, handler, "POST", "/api/v1/client/items/text", body, token)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timestamp accepted: %d", response.Code)
 	}
 }
 
@@ -286,12 +249,12 @@ func TestRealtimeWebSocketDeliveryDoesNotReplayMissedItems(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	sourceToken := registerDevice(t, handler, app, code, "ws-source-1", "Source")
 	targetToken := registerDevice(t, handler, app, code, "ws-target-1", "Target")
 
 	missedUpload := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
-		"client_item_id":    "missed-1",
+
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 		"text_content":      "missed while offline",
@@ -311,7 +274,6 @@ func TestRealtimeWebSocketDeliveryDoesNotReplayMissedItems(t *testing.T) {
 		"payload": map[string]any{
 			"device_token": targetToken,
 			"device_uuid":  "ws-target-1",
-			"last_cursor":  0,
 		},
 	}); err != nil {
 		t.Fatalf("write hello: %v", err)
@@ -343,7 +305,6 @@ func TestRealtimeWebSocketDeliveryDoesNotReplayMissedItems(t *testing.T) {
 		"payload": map[string]any{
 			"device_token": targetToken,
 			"device_uuid":  "ws-target-1",
-			"last_cursor":  0,
 		},
 	}); err != nil {
 		t.Fatalf("write second hello: %v", err)
@@ -357,7 +318,7 @@ func TestRealtimeWebSocketDeliveryDoesNotReplayMissedItems(t *testing.T) {
 	}
 
 	liveUpload := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
-		"client_item_id":    "live-1",
+
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 		"text_content":      "delivered live",
@@ -378,7 +339,7 @@ func TestRealtimeWebSocketDeliveryDoesNotReplayMissedItems(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected item payload map, got %#v", push["item"])
 	}
-	if item["client_item_id"] != "live-1" {
+	if item["text_content"] != "delivered live" || item["item_id"] == nil {
 		t.Fatalf("expected live-1 push, got %#v", item)
 	}
 }
@@ -391,7 +352,7 @@ func TestToggleSendStopsRealtimeFanout(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	sourceToken := registerDevice(t, handler, app, code, "toggle-send-source", "Source")
 	targetToken := registerDevice(t, handler, app, code, "toggle-send-target", "Target")
 
@@ -417,7 +378,7 @@ func TestToggleSendStopsRealtimeFanout(t *testing.T) {
 	}
 
 	uploadResp := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
-		"client_item_id":    "send-off-1",
+
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 		"text_content":      "should not fan out",
@@ -442,7 +403,7 @@ func TestToggleReceiveStopsRealtimeFanout(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	sourceToken := registerDevice(t, handler, app, code, "toggle-recv-source", "Source")
 	targetToken := registerDevice(t, handler, app, code, "toggle-recv-target", "Target")
 
@@ -468,7 +429,7 @@ func TestToggleReceiveStopsRealtimeFanout(t *testing.T) {
 	}
 
 	uploadResp := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
-		"client_item_id":    "recv-off-1",
+
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 		"text_content":      "should not be delivered",
@@ -485,32 +446,103 @@ func TestToggleReceiveStopsRealtimeFanout(t *testing.T) {
 	}
 }
 
-func TestDeleteDeviceRemovesRowAndInvalidatesToken(t *testing.T) {
+func TestDeleteDevicePreservesRecordAndHistory(t *testing.T) {
 	app := newTestApp(t)
-	defer func() { _ = app.Close() }()
+	defer app.Close()
 	handler := app.Router()
-
-	code := createEnrollmentToken(t, app, 10)
-	deviceToken := registerDevice(t, handler, app, code, "delete-device-1", "Delete Me")
-
+	code := openEnrollment(t, app)
+	token := registerDevice(t, handler, app, code, "delete-device-1", "Delete Me")
+	observerToken := registerDevice(t, handler, app, code, "delete-observer", "Observer")
+	upload := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{"upload_kind": "history", "text_content": "retained source"}, token)
+	if upload.Code != http.StatusOK {
+		t.Fatalf("upload: %d %s", upload.Code, upload.Body)
+	}
 	var device model.Device
+	var item model.ClipboardItem
 	if err := app.db.Where("device_uuid = ?", "delete-device-1").First(&device).Error; err != nil {
-		t.Fatalf("find device: %v", err)
+		t.Fatal(err)
 	}
-
-	resp := performAdminPost(t, handler, app, "/admin/devices/"+strconv.Itoa(int(device.ID))+"/delete")
-	if resp.Code != http.StatusFound {
-		t.Fatalf("delete device status = %d, want %d", resp.Code, http.StatusFound)
+	if err := app.db.Where("source_device_id = ?", device.ID).First(&item).Error; err != nil {
+		t.Fatal(err)
 	}
-
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	conn := connectClientWS(t, server.URL, token, device.DeviceUUID)
+	defer conn.Close()
+	observer := connectClientWS(t, server.URL, observerToken, "delete-observer")
+	defer observer.Close()
+	response := performAdminPost(t, handler, app, "/admin/devices/"+strconv.Itoa(int(device.ID))+"/delete")
+	if response.Code != http.StatusFound {
+		t.Fatalf("delete: %d %s", response.Code, response.Body)
+	}
 	var deleted model.Device
-	if err := app.db.First(&deleted, device.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected device row to be deleted, err=%v, row=%+v", err, deleted)
+	if err := app.db.First(&deleted, device.ID).Error; err != nil {
+		t.Fatalf("soft-deleted row missing: %v", err)
 	}
-
-	heartbeatResp := performJSON(t, handler, "POST", "/api/v1/client/heartbeat", map[string]any{}, deviceToken)
-	if heartbeatResp.Code != http.StatusUnauthorized {
-		t.Fatalf("deleted device token should fail, status = %d, body=%s", heartbeatResp.Code, heartbeatResp.Body.String())
+	if !deleted.Deleted || deleted.DeviceTokenHash != "" {
+		t.Fatalf("device not revoked: %+v", deleted)
+	}
+	if err := app.db.First(&item, item.ID).Error; err != nil || item.SourceDeviceID != device.ID {
+		t.Fatalf("history source was changed: %+v, %v", item, err)
+	}
+	if got := formatItemResponse(item)["source_device_id"]; got != device.ID {
+		t.Fatalf("source ID should remain numeric: %#v", got)
+	}
+	for _, path := range []string{"/api/v1/client/device/profile", "/api/v1/client/items/text", "/api/v1/client/sync/text"} {
+		if response := performJSON(t, handler, "POST", path, map[string]any{}, token); response.Code != http.StatusUnauthorized {
+			t.Fatalf("deleted token accepted on %s: %d", path, response.Code)
+		}
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("deleted device WebSocket remained open")
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("deleted device WebSocket was not closed")
+	}
+	var event struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ItemIDs []uint `json:"item_ids"`
+		} `json:"payload"`
+	}
+	_ = observer.SetReadDeadline(time.Now().Add(time.Second))
+	if err := observer.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "clipboard.sync_changed" || len(event.Payload.ItemIDs) != 0 {
+		t.Fatalf("deleted source remains visible: %+v", event)
+	}
+	page := performAdminGet(t, handler, app, "/admin/devices", "en")
+	if page.Code != http.StatusOK || strings.Contains(page.Body.String(), device.DeviceUUID) || strings.Contains(page.Body.String(), "toggle-disabled") {
+		t.Fatal("deleted device or disable control remains in management")
+	}
+	response = performAdminPost(t, handler, app, "/admin/devices/"+strconv.Itoa(int(device.ID))+"/toggle-send")
+	if !strings.Contains(response.Header().Get("Location"), "msg=update_failed") {
+		t.Fatal("deleted device permissions remain editable")
+	}
+	restoredToken := registerDevice(t, handler, app, code, device.DeviceUUID, "Restored")
+	var restored model.Device
+	if err := app.db.Where("device_uuid = ?", device.DeviceUUID).First(&restored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restored.ID != device.ID || restored.Deleted || !restored.SendRealtimeEnabled || restoredToken == token {
+		t.Fatalf("identity not restored: %+v", restored)
+	}
+	var count int64
+	if err := app.db.Model(&model.Device{}).Count(&count).Error; err != nil || count != 2 {
+		t.Fatalf("registration created another device: %d, %v", count, err)
+	}
+	if response := performJSON(t, handler, "POST", "/api/v1/client/device/profile", nil, token); response.Code != http.StatusUnauthorized {
+		t.Fatal("restoring device resurrected old token")
+	}
+	if response := performJSON(t, handler, "POST", "/api/v1/client/device/profile", nil, restoredToken); response.Code != http.StatusOK {
+		t.Fatal("restored token rejected")
+	}
+	if err := observer.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	if len(event.Payload.ItemIDs) != 1 || event.Payload.ItemIDs[0] != item.ID {
+		t.Fatalf("restored source not synchronized: %+v", event)
 	}
 }
 
@@ -519,7 +551,8 @@ func TestHubOnlineStatus(t *testing.T) {
 	device := &model.Device{ID: 42}
 	client := &WSClient{
 		device: device,
-		send:   make(chan []byte, 1),
+		send:   make(chan wsMessage, 1),
+		done:   make(chan struct{}),
 	}
 
 	if hub.IsOnline(device.ID) {
@@ -539,21 +572,21 @@ func TestTextBatchReturnsPartialResults(t *testing.T) {
 	app := newTestApp(t)
 	defer func() { _ = app.Close() }()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	handler := app.Router()
 	deviceToken := registerDevice(t, handler, app, code, "batch-1", "Batcher")
 
 	resp := performJSON(t, handler, "POST", "/api/v1/client/items/text/batch", map[string]any{
 		"items": []map[string]any{
 			{
-				"client_item_id":    "ok-1",
+
 				"upload_kind":       "history",
 				"client_created_at": time.Now().UTC().Format(time.RFC3339),
 				"text_content":      "saved",
 			},
 			{
-				"client_item_id": "",
-				"text_content":   "bad",
+
+				"text_content": "",
 			},
 		},
 	}, deviceToken)
@@ -582,7 +615,7 @@ func TestFileUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T)
 	app := newTestApp(t)
 	defer func() { _ = app.Close() }()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	handler := app.Router()
 	deviceToken := registerDevice(t, handler, app, code, "preview-file-1", "Previewer")
 
@@ -599,7 +632,7 @@ func TestFileUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T)
 	}
 
 	resp := performMultipartFileUpload(t, handler, "/api/v1/client/items/file", deviceToken, map[string]string{
-		"client_item_id":    "file-item-1",
+
 		"upload_kind":       "realtime",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 	}, "clip-123-origin name.png", previewableFileData)
@@ -619,11 +652,11 @@ func TestFileUploadPreservesOriginalFilenameAndBlobDownloadHeaders(t *testing.T)
 	if _, ok := payload.Item["blob_url"]; ok {
 		t.Fatalf("blob_url should not be returned: %#v", payload.Item)
 	}
-	if got := payload.Item["blob_name"]; got != "clip-123-origin name.png" {
-		t.Fatalf("blob_name = %#v, want %q", got, "clip-123-origin name.png")
+	if _, ok := payload.Item["blob_name"]; ok {
+		t.Fatalf("upload receipt must omit blob_name: %#v", payload.Item)
 	}
 
-	blobID, ok := payload.Item["id"].(float64)
+	blobID, ok := payload.Item["item_id"].(float64)
 	if !ok {
 		t.Fatalf("blob item id missing: %#v", payload.Item)
 	}
@@ -643,13 +676,13 @@ func TestNonImageFileUploadAcceptedOnFileEndpoint(t *testing.T) {
 	app := newTestApp(t)
 	defer func() { _ = app.Close() }()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	handler := app.Router()
 	deviceToken := registerDevice(t, handler, app, code, "file-1", "File User")
 
 	fileData := []byte("hello from clipboard river")
 	resp := performMultipartFileUpload(t, handler, "/api/v1/client/items/file", deviceToken, map[string]string{
-		"client_item_id":    "file-item-1",
+
 		"upload_kind":       "history",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 	}, "notes.txt", fileData)
@@ -672,8 +705,8 @@ func TestNonImageFileUploadAcceptedOnFileEndpoint(t *testing.T) {
 	if _, ok := payload.Item["blob_url"]; ok {
 		t.Fatalf("blob_url should not be returned: %#v", payload.Item)
 	}
-	if got := payload.Item["blob_name"]; got != "notes.txt" {
-		t.Fatalf("blob_name = %#v, want %q", got, "notes.txt")
+	if _, ok := payload.Item["blob_name"]; ok {
+		t.Fatalf("upload receipt must omit blob_name: %#v", payload.Item)
 	}
 	mimeType, _ := payload.Item["mime_type"].(string)
 	if !strings.HasPrefix(mimeType, "text/plain") {
@@ -681,75 +714,46 @@ func TestNonImageFileUploadAcceptedOnFileEndpoint(t *testing.T) {
 	}
 }
 
-func TestExhaustedEnrollmentTokenCannotBeReused(t *testing.T) {
+func TestEnrollmentWindowLifecycle(t *testing.T) {
 	app := newTestApp(t)
-	defer func() { _ = app.Close() }()
-
-	code := createEnrollmentToken(t, app, 1)
+	defer app.Close()
 	handler := app.Router()
-
-	registerDevice(t, handler, app, code, "limited-1", "First")
-
-	resp := performJSON(t, handler, "POST", "/api/v1/client/register", map[string]any{
-		"device_uuid":     "limited-2",
-		"enrollment_code": code,
-		"nickname":        "Second",
-		"os_name":         "TestOS",
-		"os_version":      "1.0",
-		"platform":        "test",
-		"app_version":     "1.0.0",
-	}, "")
-	if resp.Code != http.StatusUnauthorized {
-		t.Fatalf("second register status = %d, want %d, body=%s", resp.Code, http.StatusUnauthorized, resp.Body.String())
+	if app.enrollment.snapshot().Open || app.db.Migrator().HasTable("enrollment_tokens") {
+		t.Fatal("enrollment must start closed without a table")
 	}
-
-	var token model.EnrollmentToken
-	if err := app.db.Where("code_hash = ?", auth.HashToken(code)).First(&token).Error; err != nil {
-		t.Fatalf("find enrollment token: %v", err)
+	response := performAdminPost(t, handler, app, "/admin/tokens/open")
+	if response.Code != http.StatusFound {
+		t.Fatalf("open: %d", response.Code)
 	}
-	if token.UsedCount != 1 {
-		t.Fatalf("used_count = %d, want 1", token.UsedCount)
+	snapshot := app.enrollment.snapshot()
+	if !snapshot.Open || snapshot.RemainingSeconds < 299 || snapshot.RemainingSeconds > 300 {
+		t.Fatalf("unexpected window: %+v", snapshot)
 	}
-	if token.RevokedAt != nil {
-		t.Fatalf("exhausted token should not be revoked")
+	token := registerDevice(t, handler, app, snapshot.Code, "window-1", "Window")
+	registerDevice(t, handler, app, snapshot.Code, "window-2", "Window 2")
+	for _, page := range []string{"/admin/tokens", "/admin/devices", "/admin/settings"} {
+		response := performAdminGet(t, handler, app, page, "en")
+		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "can't evaluate field") {
+			t.Fatalf("admin page %s: %d %s", page, response.Code, response.Body)
+		}
 	}
-	if status := resolveEnrollmentTokenStatus(token, time.Now().UTC()); status != enrollmentTokenStatusExhausted {
-		t.Fatalf("token status = %s, want %s", status, enrollmentTokenStatusExhausted)
+	performAdminPost(t, handler, app, "/admin/tokens/close")
+	request := map[string]any{"device_uuid": "window-1", "enrollment_code": snapshot.Code}
+	if response := performJSON(t, handler, "POST", "/api/v1/client/register", request, ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("closed window accepted code: %d", response.Code)
 	}
-}
-
-func TestRevokeInactiveEnrollmentTokenDoesNotChangeState(t *testing.T) {
-	app := newTestApp(t)
-	defer func() { _ = app.Close() }()
-
-	code := createEnrollmentToken(t, app, 1)
-	handler := app.Router()
-	registerDevice(t, handler, app, code, "limited-3", "First")
-
-	var token model.EnrollmentToken
-	if err := app.db.Where("code_hash = ?", auth.HashToken(code)).First(&token).Error; err != nil {
-		t.Fatalf("find enrollment token: %v", err)
+	if response := performJSON(t, handler, "POST", "/api/v1/client/device/profile", nil, token); response.Code != http.StatusOK {
+		t.Fatalf("closing enrollment revoked device: %d", response.Code)
 	}
-
-	req := httptest.NewRequest(http.MethodPost, "/admin/tokens/1/revoke", nil)
-	req.SetPathValue("id", strconv.FormatUint(uint64(token.ID), 10))
-	recorder := httptest.NewRecorder()
-	app.handleAdminRevokeToken(recorder, req)
-
-	if recorder.Code != http.StatusFound {
-		t.Fatalf("revoke status = %d, want %d", recorder.Code, http.StatusFound)
+	freshCode := openEnrollment(t, app)
+	if freshCode == snapshot.Code || app.enrollment.authorize(snapshot.Code) {
+		t.Fatal("reopening must replace the code")
 	}
-	location := recorder.Result().Header.Get("Location")
-	if !strings.Contains(location, "msg=token_not_active") {
-		t.Fatalf("unexpected redirect location: %s", location)
-	}
-
-	var after model.EnrollmentToken
-	if err := app.db.First(&after, token.ID).Error; err != nil {
-		t.Fatalf("reload token: %v", err)
-	}
-	if after.RevokedAt != nil {
-		t.Fatalf("inactive token should not be revoked")
+	app.enrollment.mu.Lock()
+	app.enrollment.deadline = time.Now().Add(-time.Second)
+	app.enrollment.mu.Unlock()
+	if app.enrollment.authorize(freshCode) || app.enrollment.snapshot().Open {
+		t.Fatal("expired window must close even before timer fires")
 	}
 }
 
@@ -788,9 +792,9 @@ func TestAdminSettingsAcceptFileMaxBytes(t *testing.T) {
 
 	handler := app.Router()
 	resp := performAdminFormPost(t, handler, app, "/admin/settings", url.Values{
-		"realtime_fanout_enabled": {"on"},
-		"retention_days":          {strconv.Itoa(app.account.RetentionDays)},
-		"file_max_bytes":          {"111111"},
+
+		"retention_days": {strconv.Itoa(app.account.RetentionDays)},
+		"file_max_bytes": {"111111"},
 	})
 	if resp.Code != http.StatusFound {
 		t.Fatalf("settings update status = %d, body=%s", resp.Code, resp.Body.String())
@@ -809,7 +813,7 @@ func TestAdminHistoryShowsPaginationWhenMultiplePagesExist(t *testing.T) {
 	app := newTestApp(t)
 	defer func() { _ = app.Close() }()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	handler := app.Router()
 	registerDevice(t, handler, app, code, "history-device-1", "History Device")
 
@@ -822,9 +826,9 @@ func TestAdminHistoryShowsPaginationWhenMultiplePagesExist(t *testing.T) {
 	items := make([]model.ClipboardItem, 0, 51)
 	for i := 0; i < 51; i++ {
 		items = append(items, model.ClipboardItem{
-			AccountID:       app.account.ID,
-			SourceDeviceID:  device.ID,
-			ClientItemID:    "hist-item-" + strconv.Itoa(i),
+			AccountID:      app.account.ID,
+			SourceDeviceID: device.ID,
+
 			ContentKind:     model.ContentKindText,
 			UploadKind:      model.UploadKindHistory,
 			TextContent:     "history item " + strconv.Itoa(i),
@@ -868,11 +872,11 @@ func TestAdminHistoryShowsDeletedDeviceLabel(t *testing.T) {
 	defer func() { _ = app.Close() }()
 	handler := app.Router()
 
-	code := createEnrollmentToken(t, app, 10)
+	code := openEnrollment(t, app)
 	deviceToken := registerDevice(t, handler, app, code, "deleted-history-device-1", "History Owner")
 
 	uploadResp := performJSON(t, handler, "POST", "/api/v1/client/items/text", map[string]any{
-		"client_item_id":    "deleted-history-item-1",
+
 		"upload_kind":       "history",
 		"client_created_at": time.Now().UTC().Format(time.RFC3339),
 		"text_content":      "saved before delete",
@@ -885,15 +889,15 @@ func TestAdminHistoryShowsDeletedDeviceLabel(t *testing.T) {
 	if err := app.db.Where("device_uuid = ?", "deleted-history-device-1").First(&device).Error; err != nil {
 		t.Fatalf("find device: %v", err)
 	}
-	if err := app.db.Delete(&model.Device{}, device.ID).Error; err != nil {
-		t.Fatalf("delete device: %v", err)
+	if response := performAdminPost(t, handler, app, "/admin/devices/"+strconv.Itoa(int(device.ID))+"/delete"); response.Code != http.StatusFound {
+		t.Fatalf("delete device: %d", response.Code)
 	}
 
 	page := performAdminGet(t, handler, app, "/admin/history", "en")
 	if page.Code != http.StatusOK {
 		t.Fatalf("history page status = %d, body=%s", page.Code, page.Body.String())
 	}
-	if !strings.Contains(page.Body.String(), "Deleted device") {
+	if !strings.Contains(page.Body.String(), "History Owner (Deleted device)") {
 		t.Fatalf("expected deleted device label, body=%s", page.Body.String())
 	}
 }
@@ -943,19 +947,12 @@ func setAdminPassword(t *testing.T, app *App, username, password string) {
 	}
 }
 
-func createEnrollmentToken(t *testing.T, app *App, maxUses int) string {
+func openEnrollment(t *testing.T, app *App) string {
 	t.Helper()
-	code := "code-" + time.Now().UTC().Format("150405.000000000")
-	token := model.EnrollmentToken{
-		AccountID:  app.account.ID,
-		CodeHash:   auth.HashToken(code),
-		CodePrefix: code,
-		MaxUses:    maxUses,
+	if err := app.enrollment.open(); err != nil {
+		t.Fatalf("open enrollment: %v", err)
 	}
-	if err := app.db.Create(&token).Error; err != nil {
-		t.Fatalf("create enrollment token: %v", err)
-	}
-	return code
+	return app.enrollment.snapshot().Code
 }
 
 func registerDevice(t *testing.T, handler http.Handler, app *App, code, uuid, nickname string) string {
@@ -964,10 +961,9 @@ func registerDevice(t *testing.T, handler http.Handler, app *App, code, uuid, ni
 		"device_uuid":     uuid,
 		"enrollment_code": code,
 		"nickname":        nickname,
-		"os_name":         "TestOS",
-		"os_version":      "1.0",
-		"platform":        "test",
-		"app_version":     "1.0.0",
+
+		"app_name":    "Test Client",
+		"app_version": "1.0.0",
 	}, "")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("register device %s failed: %d %s", uuid, resp.Code, resp.Body.String())
@@ -1061,7 +1057,6 @@ func connectClientWS(t *testing.T, serverURL, deviceToken, deviceUUID string) *w
 		"payload": map[string]any{
 			"device_token": deviceToken,
 			"device_uuid":  deviceUUID,
-			"last_cursor":  0,
 		},
 	}); err != nil {
 		_ = conn.Close()

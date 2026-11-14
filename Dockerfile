@@ -21,9 +21,7 @@ RUN apk add --no-cache ca-certificates && \
 
 COPY --from=build /out/cb-river-server /app/cb-river-server
 
-ENV CBR_CONFIG=./data/config.json
-
 EXPOSE 8080
 VOLUME ["/app/data"]
 
-CMD ["./cb-river-server"]
+CMD ["./cb-river-server", "--config", "/app/data/config.json"]
