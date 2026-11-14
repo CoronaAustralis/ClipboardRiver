@@ -1,6 +1,6 @@
 services:
   clipboard-river-server:
-    image: crestfallmax/clipboard-river-server:latest
+    image: ghcr.io/coronaaustralis/clipboardriver:latest
     container_name: clipboard-river-server
     restart: unless-stopped
     ports:

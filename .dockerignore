@@ -1,6 +1,8 @@
 .git
 .gocache
 .gomodcache
+dist
+bin
 data
 config.json
 *.db

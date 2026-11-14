@@ -115,8 +115,10 @@ docker compose up -d
 直接运行（Linux）：
 
 ```bash
-docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" crestfallmax/clipboard-river-server:latest
+docker run --name clipboard-river-server -p 8080:8080 -v "$(pwd)/data:/app/data" ghcr.io/coronaaustralis/clipboardriver:latest
 ```
+
+镜像支持 Linux amd64 和 arm64。`latest` 跟随最近发布的版本，也可替换为固定版本标签，例如 `ghcr.io/coronaaustralis/clipboardriver:v1.0.0`。
 
 ## 管理后台
 
