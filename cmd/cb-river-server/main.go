@@ -15,7 +15,7 @@ import (
 	"github.com/clipboardriver/cb_river_server/internal/config"
 )
 
-var version = "dev"
+var version = "0.1.1"
 
 func main() {
 	configPath := flag.String("config", "", "JSON config file path (defaults to ./config.json)")
